@@ -6,6 +6,15 @@ use std::sync::Once;
 use base64::Engine;
 use obscura_dom::{parse_html, DomTree, NodeData, NodeId};
 
+mod state;
+mod trace;
+mod values;
+
+use state::{NativeState, TimerTask};
+pub use trace::TraceEvent;
+use trace::{record_function_trace, record_trace, trace_args, trace_json_from_events};
+use values::{exception_string, set_property, v8_str, v8_value_to_json};
+
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
     pub url: String,
@@ -57,35 +66,10 @@ pub enum RuntimeError {
     Json(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceEvent {
-    pub target: String,
-    pub name: String,
-    pub kind: String,
-    pub args: Vec<String>,
-    pub result: Option<String>,
-}
-
 pub struct NativeRuntime {
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
     state: Box<NativeState>,
-}
-
-struct NativeState {
-    options: RuntimeOptions,
-    dom: DomTree,
-    title: String,
-    cookies: Vec<(String, String)>,
-    next_timer_id: u32,
-    timers: Vec<TimerTask>,
-    trace: Vec<TraceEvent>,
-}
-
-struct TimerTask {
-    id: u32,
-    callback: v8::Global<v8::Function>,
-    repeat: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -352,21 +336,7 @@ impl NativeRuntime {
     }
 
     pub fn trace_json(&self) -> serde_json::Value {
-        serde_json::Value::Array(
-            self.state
-                .trace
-                .iter()
-                .map(|event| {
-                    serde_json::json!({
-                        "target": event.target,
-                        "name": event.name,
-                        "kind": event.kind,
-                        "args": event.args,
-                        "result": event.result,
-                    })
-                })
-                .collect(),
-        )
+        trace_json_from_events(&self.state.trace)
     }
 
     fn pump_v8_message_loop(&mut self) {
@@ -731,70 +701,6 @@ fn set_traced_function_property(
     object.set(scope, key.into(), function.into());
 }
 
-fn set_property(
-    scope: &mut v8::HandleScope,
-    object: v8::Local<v8::Object>,
-    key: &str,
-    value: v8::Local<v8::Value>,
-) {
-    let key = v8::String::new(scope, key).unwrap();
-    object.set(scope, key.into(), value);
-}
-
-fn record_trace(
-    scope: &mut v8::HandleScope,
-    target: &str,
-    name: &str,
-    kind: &str,
-    args: Vec<String>,
-    result: Option<String>,
-) {
-    let global = scope.get_current_context().global(scope);
-    let state = unsafe { &mut *state_ptr(scope, global) };
-    state.trace.push(TraceEvent {
-        target: target.to_string(),
-        name: name.to_string(),
-        kind: kind.to_string(),
-        args,
-        result,
-    });
-}
-
-fn record_function_trace(
-    scope: &mut v8::HandleScope,
-    args: &v8::FunctionCallbackArguments,
-    call_args: Vec<String>,
-    result: Option<String>,
-) {
-    let (target, name) = binding_from_data(scope, args.data())
-        .unwrap_or_else(|| ("unknown".to_string(), "anonymous".to_string()));
-    record_trace(scope, &target, &name, "call", call_args, result);
-}
-
-fn trace_args(scope: &mut v8::HandleScope, args: &v8::FunctionCallbackArguments) -> Vec<String> {
-    let mut values = Vec::new();
-    for index in 0..args.length() {
-        values.push(trace_value(scope, args.get(index)));
-    }
-    values
-}
-
-fn trace_value(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> String {
-    if value.is_null() {
-        return "null".to_string();
-    }
-    if value.is_undefined() {
-        return "undefined".to_string();
-    }
-    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
-        return format!("ArrayBufferView({})", view.byte_length());
-    }
-    value
-        .to_string(scope)
-        .map(|value| value.to_rust_string_lossy(scope))
-        .unwrap_or_else(|| "[unprintable]".to_string())
-}
-
 fn binding_data<'s>(
     scope: &mut v8::HandleScope<'s>,
     target: &str,
@@ -803,7 +709,7 @@ fn binding_data<'s>(
     v8_str(scope, &format!("{target}\u{1f}{name}")).into()
 }
 
-fn binding_from_data(
+pub(crate) fn binding_from_data(
     scope: &mut v8::HandleScope,
     data: v8::Local<v8::Value>,
 ) -> Option<(String, String)> {
@@ -1652,7 +1558,10 @@ fn element_get_attribute(
     }
 }
 
-fn state_ptr(scope: &mut v8::HandleScope, object: v8::Local<v8::Object>) -> *mut NativeState {
+pub(crate) fn state_ptr(
+    scope: &mut v8::HandleScope,
+    object: v8::Local<v8::Object>,
+) -> *mut NativeState {
     let external = object
         .get_internal_field(scope, 0)
         .unwrap()
@@ -1708,44 +1617,4 @@ fn set_document_cookie(state: &mut NativeState, cookie: &str) {
     } else {
         state.cookies.push((name.to_string(), value.to_string()));
     }
-}
-
-fn v8_str<'s>(scope: &mut v8::HandleScope<'s>, value: &str) -> v8::Local<'s, v8::String> {
-    v8::String::new(scope, value).unwrap()
-}
-
-fn v8_value_to_json(
-    scope: &mut v8::HandleScope,
-    value: v8::Local<v8::Value>,
-) -> Result<serde_json::Value, RuntimeError> {
-    if value.is_undefined() {
-        return Ok(serde_json::Value::Null);
-    }
-
-    let global = scope.get_current_context().global(scope);
-    let json_key = v8::String::new(scope, "JSON").unwrap();
-    let json = global.get(scope, json_key.into()).unwrap();
-    let json = v8::Local::<v8::Object>::try_from(json)
-        .map_err(|_| RuntimeError::Json("global JSON is not an object".to_string()))?;
-    let stringify_key = v8::String::new(scope, "stringify").unwrap();
-    let stringify = json.get(scope, stringify_key.into()).unwrap();
-    let stringify = v8::Local::<v8::Function>::try_from(stringify)
-        .map_err(|_| RuntimeError::Json("JSON.stringify is not a function".to_string()))?;
-    let json_value = stringify
-        .call(scope, json.into(), &[value])
-        .ok_or_else(|| RuntimeError::Json("JSON.stringify failed".to_string()))?;
-
-    if json_value.is_undefined() {
-        return Ok(serde_json::Value::Null);
-    }
-
-    let json_string = json_value
-        .to_string(scope)
-        .ok_or_else(|| RuntimeError::Json("JSON.stringify did not return a string".to_string()))?
-        .to_rust_string_lossy(scope);
-    serde_json::from_str(&json_string).map_err(|err| RuntimeError::Json(err.to_string()))
-}
-
-fn exception_string<P>(_scope: &mut v8::TryCatch<P>) -> String {
-    "unknown exception".to_string()
 }
