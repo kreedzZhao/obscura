@@ -623,7 +623,7 @@ git commit -m "refactor: split native document api"
 - Produces: `base64::install_base64`
 - Produces: `crypto::install_crypto`
 
-- [ ] **Step 1: Move timer code**
+- [x] **Step 1: Move timer code**
 
 Move these from `lib.rs` to `webapi/timers.rs`:
 
@@ -635,7 +635,7 @@ allocate_timer
 clear_timer
 ```
 
-- [ ] **Step 2: Move encoding code**
+- [x] **Step 2: Move encoding code**
 
 Move these from `lib.rs` to `webapi/encoding.rs`:
 
@@ -648,7 +648,7 @@ text_encoder_encode
 text_decoder_decode
 ```
 
-- [ ] **Step 3: Move base64 code**
+- [x] **Step 3: Move base64 code**
 
 Move these from `lib.rs` to `webapi/base64.rs`:
 
@@ -658,7 +658,7 @@ atob
 btoa
 ```
 
-- [ ] **Step 4: Move crypto code**
+- [x] **Step 4: Move crypto code**
 
 Move these from `lib.rs` to `webapi/crypto.rs`:
 
@@ -667,7 +667,7 @@ install_crypto
 crypto_get_random_values
 ```
 
-- [ ] **Step 5: Install modules from webapi/mod.rs**
+- [x] **Step 5: Install modules from webapi/mod.rs**
 
 Add module declarations and calls:
 
@@ -683,7 +683,7 @@ base64::install_base64(scope, global);
 crypto::install_crypto(scope, global);
 ```
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 Run:
 
@@ -699,7 +699,7 @@ cargo test -p obscura-native-runtime exposes_crypto_get_random_values -- --test-
 
 Expected: all listed tests pass.
 
-- [ ] **Step 7: Run full smoke test**
+- [x] **Step 7: Run full smoke test**
 
 Run:
 
@@ -709,7 +709,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all tests pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 Run:
 

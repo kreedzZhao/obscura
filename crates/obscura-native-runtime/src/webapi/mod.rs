@@ -1,7 +1,11 @@
+pub(crate) mod base64;
+pub(crate) mod crypto;
 pub(crate) mod document;
+pub(crate) mod encoding;
 pub(crate) mod location;
 pub(crate) mod navigator;
 pub(crate) mod screen;
+pub(crate) mod timers;
 pub(crate) mod window;
 
 use std::ffi::c_void;
@@ -20,10 +24,10 @@ pub(crate) fn install_browser_objects(scope: &mut v8::HandleScope, state_ptr: *m
     set_property(scope, global, "window", global.into());
     set_property(scope, global, "self", global.into());
     window::install_window_values(scope, global);
-    crate::install_timer_functions(scope, global);
-    crate::install_encoding(scope, global);
-    crate::install_base64(scope, global);
-    crate::install_crypto(scope, global);
+    timers::install_timer_functions(scope, global);
+    encoding::install_encoding(scope, global);
+    base64::install_base64(scope, global);
+    crypto::install_crypto(scope, global);
 
     let navigator = navigator::create_navigator(scope, state_ptr);
     set_property(scope, global, "navigator", navigator.into());

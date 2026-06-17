@@ -2,7 +2,6 @@
 
 use std::sync::Once;
 
-use base64::Engine;
 use obscura_dom::{parse_html, DomTree};
 
 mod bindings;
@@ -11,10 +10,8 @@ mod trace;
 mod values;
 mod webapi;
 
-use bindings::{
-    set_function_property, set_template_function, set_traced_function_property, state_ptr,
-};
-use state::{NativeState, TimerTask};
+use bindings::set_traced_function_property;
+use state::NativeState;
 pub use trace::TraceEvent;
 use trace::{record_function_trace, trace_args, trace_json_from_events};
 use values::{exception_string, set_property, v8_str, v8_value_to_json};
@@ -273,66 +270,6 @@ pub(crate) fn install_dom_constructors(scope: &mut v8::HandleScope, global: v8::
     );
 }
 
-pub(crate) fn install_timer_functions(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
-    set_function_property(scope, global, "setTimeout", set_timeout);
-    set_function_property(scope, global, "setInterval", set_interval);
-    set_function_property(scope, global, "clearTimeout", clear_timer);
-    set_function_property(scope, global, "clearInterval", clear_timer);
-}
-
-pub(crate) fn install_encoding(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
-    install_encoding_constructor(
-        scope,
-        global,
-        "TextEncoder",
-        text_encoder_constructor,
-        "encode",
-        text_encoder_encode,
-    );
-    install_encoding_constructor(
-        scope,
-        global,
-        "TextDecoder",
-        text_decoder_constructor,
-        "decode",
-        text_decoder_decode,
-    );
-}
-
-pub(crate) fn install_base64(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
-    set_function_property(scope, global, "atob", atob);
-    set_function_property(scope, global, "btoa", btoa);
-}
-
-pub(crate) fn install_crypto(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
-    let crypto = v8::Object::new(scope);
-    set_traced_function_property(
-        scope,
-        crypto,
-        "crypto",
-        "getRandomValues",
-        crypto_get_random_values,
-    );
-    set_property(scope, global, "crypto", crypto.into());
-}
-
-fn install_encoding_constructor(
-    scope: &mut v8::HandleScope,
-    global: v8::Local<v8::Object>,
-    name: &str,
-    constructor_callback: impl v8::MapFnTo<v8::FunctionCallback>,
-    method_name: &str,
-    method_callback: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let constructor = v8::FunctionTemplate::new(scope, constructor_callback);
-    constructor.set_class_name(v8::String::new(scope, name).unwrap());
-    let instance = constructor.instance_template(scope);
-    set_template_function(scope, instance, method_name, method_callback);
-    let function = constructor.get_function(scope).unwrap();
-    global.set(scope, key.into(), function.into());
-}
-
 fn html_canvas_element_constructor(
     scope: &mut v8::HandleScope,
     args: v8::FunctionCallbackArguments,
@@ -370,191 +307,6 @@ fn webgl_rendering_context_constructor(
     }
     let context = create_webgl_context(scope);
     rv.set(context.into());
-}
-
-fn set_timeout(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let id = allocate_timer(scope, args.get(0), false);
-    rv.set(v8::Integer::new_from_unsigned(scope, id).into());
-}
-
-fn set_interval(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let id = allocate_timer(scope, args.get(0), true);
-    rv.set(v8::Integer::new_from_unsigned(scope, id).into());
-}
-
-fn allocate_timer(
-    scope: &mut v8::HandleScope,
-    callback_value: v8::Local<v8::Value>,
-    repeat: bool,
-) -> u32 {
-    let context = scope.get_current_context();
-    let global = context.global(scope);
-    let callback = v8::Local::<v8::Function>::try_from(callback_value)
-        .ok()
-        .map(|callback| v8::Global::new(scope, callback));
-    let state = unsafe { &mut *state_ptr(scope, global) };
-    let id = state.next_timer_id;
-    state.next_timer_id = state.next_timer_id.saturating_add(1);
-    if let Some(callback) = callback {
-        state.timers.push(TimerTask {
-            id,
-            callback,
-            repeat,
-        });
-    }
-    id
-}
-
-fn clear_timer(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let context = scope.get_current_context();
-    let global = context.global(scope);
-    let state = unsafe { &mut *state_ptr(scope, global) };
-    let id = args.get(0).uint32_value(scope).unwrap_or(0);
-    state.timers.retain(|timer| timer.id != id);
-}
-
-fn atob(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
-    let input = args.get(0).to_rust_string_lossy(scope);
-    match base64::engine::general_purpose::STANDARD.decode(input.as_bytes()) {
-        Ok(bytes) => {
-            let output: String = bytes.into_iter().map(char::from).collect();
-            rv.set(v8_str(scope, &output).into());
-        }
-        Err(error) => {
-            let message = v8_str(scope, &error.to_string());
-            let exception = v8::Exception::type_error(scope, message);
-            scope.throw_exception(exception);
-        }
-    }
-}
-
-fn btoa(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
-    let input = args.get(0).to_rust_string_lossy(scope);
-    let bytes = input.chars().map(|ch| ch as u8).collect::<Vec<_>>();
-    let output = base64::engine::general_purpose::STANDARD.encode(bytes);
-    rv.set(v8_str(scope, &output).into());
-}
-
-fn crypto_get_random_values(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let value = args.get(0);
-    let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) else {
-        let message = v8_str(scope, "getRandomValues expects an ArrayBufferView");
-        let exception = v8::Exception::type_error(scope, message);
-        scope.throw_exception(exception);
-        return;
-    };
-
-    let length = view.byte_length();
-    let data = view.data().cast::<u8>();
-    let mut bytes = vec![0; length];
-    if let Err(error) = getrandom::getrandom(&mut bytes) {
-        let message = v8_str(scope, &error.to_string());
-        let exception = v8::Exception::type_error(scope, message);
-        scope.throw_exception(exception);
-        return;
-    }
-    for (index, byte) in bytes.into_iter().enumerate() {
-        unsafe {
-            data.add(index).write(byte);
-        }
-    }
-    record_function_trace(
-        scope,
-        &args,
-        vec![format!("ArrayBufferView({length})")],
-        Some(format!("ArrayBufferView({length})")),
-    );
-    rv.set(value);
-}
-
-fn text_encoder_constructor(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if args.is_construct_call() {
-        rv.set(args.this().into());
-        return;
-    }
-    let context = scope.get_current_context();
-    let global = context.global(scope);
-    let key = v8::String::new(scope, "TextEncoder").unwrap();
-    if let Some(value) = global.get(scope, key.into()) {
-        if let Ok(function) = v8::Local::<v8::Function>::try_from(value) {
-            if let Some(instance) = function.new_instance(scope, &[]) {
-                rv.set(instance.into());
-            }
-        }
-    }
-}
-
-fn text_decoder_constructor(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if args.is_construct_call() {
-        rv.set(args.this().into());
-        return;
-    }
-    let context = scope.get_current_context();
-    let global = context.global(scope);
-    let key = v8::String::new(scope, "TextDecoder").unwrap();
-    if let Some(value) = global.get(scope, key.into()) {
-        if let Ok(function) = v8::Local::<v8::Function>::try_from(value) {
-            if let Some(instance) = function.new_instance(scope, &[]) {
-                rv.set(instance.into());
-            }
-        }
-    }
-}
-
-fn text_encoder_encode(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let input = args.get(0).to_rust_string_lossy(scope);
-    let bytes = input.into_bytes();
-    let length = bytes.len();
-    let backing_store = v8::ArrayBuffer::new_backing_store_from_bytes(bytes).make_shared();
-    let buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
-    if let Some(array) = v8::Uint8Array::new(scope, buffer, 0, length) {
-        rv.set(array.into());
-    }
-}
-
-fn text_decoder_decode(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let value = args.get(0);
-    let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) else {
-        rv.set(v8_str(scope, "").into());
-        return;
-    };
-    let mut bytes = vec![0; view.byte_length()];
-    let copied = view.copy_contents(&mut bytes);
-    bytes.truncate(copied);
-    let decoded = String::from_utf8_lossy(&bytes);
-    rv.set(v8_str(scope, decoded.as_ref()).into());
 }
 
 fn create_canvas_element<'s>(scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::Object> {
