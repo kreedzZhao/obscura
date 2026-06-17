@@ -33,7 +33,7 @@ pub(crate) fn record_trace(
     result: Option<String>,
 ) {
     let global = scope.get_current_context().global(scope);
-    let state = unsafe { &mut *crate::state_ptr(scope, global) };
+    let state = unsafe { &mut *crate::bindings::state_ptr(scope, global) };
     state.trace.push(TraceEvent {
         target: target.to_string(),
         name: name.to_string(),
@@ -49,7 +49,7 @@ pub(crate) fn record_function_trace(
     call_args: Vec<String>,
     result: Option<String>,
 ) {
-    let (target, name) = crate::binding_from_data(scope, args.data())
+    let (target, name) = crate::bindings::binding_from_data(scope, args.data())
         .unwrap_or_else(|| ("unknown".to_string(), "anonymous".to_string()));
     record_trace(scope, &target, &name, "call", call_args, result);
 }

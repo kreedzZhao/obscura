@@ -29,7 +29,7 @@
 - Consumes: existing `NativeRuntime`, `RuntimeOptions`, and trace APIs.
 - Produces: tests that lock down plugin/mime type shape and trace JSON shape before code moves.
 
-- [ ] **Step 1: Add plugin and mime type assertions**
+- [x] **Step 1: Add plugin and mime type assertions**
 
 Add this test near `exposes_track17_fingerprint_environment`:
 
@@ -75,7 +75,7 @@ fn exposes_pdf_plugin_and_mime_type_shape_for_track17() {
 }
 ```
 
-- [ ] **Step 2: Add trace JSON shape assertions**
+- [x] **Step 2: Add trace JSON shape assertions**
 
 Add this test after `records_web_api_trace_events`:
 
@@ -101,7 +101,7 @@ fn trace_json_keeps_stable_event_shape() {
 }
 ```
 
-- [ ] **Step 3: Run focused tests**
+- [x] **Step 3: Run focused tests**
 
 Run:
 
@@ -112,7 +112,7 @@ cargo test -p obscura-native-runtime trace_json_keeps_stable_event_shape -- --te
 
 Expected: both tests pass against the current implementation.
 
-- [ ] **Step 4: Run full smoke test**
+- [x] **Step 4: Run full smoke test**
 
 Run:
 
@@ -122,7 +122,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all runtime smoke tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
@@ -145,7 +145,7 @@ git commit -m "test: lock native runtime browser surface"
 - Produces: `values::v8_str`, `values::v8_value_to_json`, `values::exception_string`, `values::set_property`
 - Preserves: `pub use trace::TraceEvent`
 
-- [ ] **Step 1: Move state structs**
+- [x] **Step 1: Move state structs**
 
 Create `src/state.rs`:
 
@@ -179,7 +179,7 @@ mod state;
 use state::NativeState;
 ```
 
-- [ ] **Step 2: Move trace event and recording helpers**
+- [x] **Step 2: Move trace event and recording helpers**
 
 Create `src/trace.rs` with:
 
@@ -237,7 +237,7 @@ Update `NativeRuntime::trace_json` to call:
 trace::trace_json_from_events(&self.state.trace)
 ```
 
-- [ ] **Step 3: Move V8 value helpers**
+- [x] **Step 3: Move V8 value helpers**
 
 Create `src/values.rs` and move:
 
@@ -250,7 +250,7 @@ pub(crate) fn exception_string(...)
 
 Update imports in `lib.rs`.
 
-- [ ] **Step 4: Run formatter**
+- [x] **Step 4: Run formatter**
 
 Run:
 
@@ -260,7 +260,7 @@ cargo fmt -p obscura-native-runtime
 
 Expected: no output.
 
-- [ ] **Step 5: Run full smoke test**
+- [x] **Step 5: Run full smoke test**
 
 Run:
 
@@ -270,7 +270,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
@@ -298,7 +298,7 @@ git commit -m "refactor: extract native runtime state and trace"
 - Produces: `bindings::state_ptr`
 - Produces: `bindings::binding_from_data`
 
-- [ ] **Step 1: Create bindings module**
+- [x] **Step 1: Create bindings module**
 
 Move these items from `lib.rs` into `src/bindings.rs`:
 
@@ -325,11 +325,11 @@ state_ptr
 
 Make the items used by WebAPI modules `pub(crate)`.
 
-- [ ] **Step 2: Keep accessor spec arrays temporarily in lib.rs**
+- [x] **Step 2: Keep accessor spec arrays temporarily in lib.rs**
 
 Leave `WINDOW_ACCESSORS`, `NAVIGATOR_ACCESSORS`, `SCREEN_ACCESSORS`, `LOCATION_ACCESSORS`, `DOCUMENT_ACCESSORS`, and `CANVAS_2D_NOOP_METHODS` in `lib.rs` for this task. Update them to use `bindings::AccessorSpec`, `bindings::AccessorValue`, and `bindings::accessor`.
 
-- [ ] **Step 3: Update imports**
+- [x] **Step 3: Update imports**
 
 Add to `lib.rs`:
 
@@ -345,7 +345,7 @@ use bindings::{
 
 Adjust the list to exactly what the compiler reports as needed.
 
-- [ ] **Step 4: Run focused trace tests**
+- [x] **Step 4: Run focused trace tests**
 
 Run:
 
@@ -356,7 +356,7 @@ cargo test -p obscura-native-runtime trace_json_keeps_stable_event_shape -- --te
 
 Expected: both trace tests pass.
 
-- [ ] **Step 5: Run full smoke test**
+- [x] **Step 5: Run full smoke test**
 
 Run:
 
@@ -366,7 +366,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
