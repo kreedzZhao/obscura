@@ -829,7 +829,7 @@ git commit -m "refactor: split canvas and webgl APIs"
 - Produces: clean module tree with no dead helper copies in `lib.rs`.
 - Preserves: working `track17_open` real POST path.
 
-- [ ] **Step 1: Search for leftover responsibilities in lib.rs**
+- [x] **Step 1: Search for leftover responsibilities in lib.rs**
 
 Run:
 
@@ -839,7 +839,7 @@ rg -n "AccessorSpec|AccessorValue|record_trace|set_traced|create_canvas|webgl_|d
 
 Expected: no matches except module imports or public facade references.
 
-- [ ] **Step 2: Run formatter**
+- [x] **Step 2: Run formatter**
 
 Run:
 
@@ -849,7 +849,7 @@ cargo fmt -p obscura-native-runtime
 
 Expected: no output.
 
-- [ ] **Step 3: Run full smoke test**
+- [x] **Step 3: Run full smoke test**
 
 Run:
 
@@ -859,7 +859,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all tests pass.
 
-- [ ] **Step 4: Run example check**
+- [x] **Step 4: Run example check**
 
 Run:
 
@@ -869,7 +869,7 @@ cargo check -p obscura-native-runtime --example track17_open
 
 Expected: check passes.
 
-- [ ] **Step 5: Run live 17TRACK verification**
+- [x] **Step 5: Run live 17TRACK verification**
 
 Run:
 
@@ -884,7 +884,7 @@ Expected:
 - response contains `"shipments":[{"code":200`
 - response does not contain `"code":-13`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
