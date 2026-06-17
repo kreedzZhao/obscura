@@ -113,7 +113,7 @@ fn document_create_element(
     set_property(scope, element, "nodeType", node_type.into());
 
     if tag_name == "CANVAS" {
-        crate::install_canvas_members(scope, element);
+        crate::webapi::canvas::install_canvas_members(scope, element);
     }
 
     let tag = v8::String::new(scope, "Element").unwrap();

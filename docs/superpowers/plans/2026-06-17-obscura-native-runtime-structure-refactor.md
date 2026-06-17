@@ -734,7 +734,7 @@ git commit -m "refactor: split utility browser APIs"
 - Produces: `webgl::install_webgl_constructor`
 - Produces: `webgl::create_webgl_context`
 
-- [ ] **Step 1: Move canvas code**
+- [x] **Step 1: Move canvas code**
 
 Move these from `lib.rs` to `webapi/canvas.rs`:
 
@@ -750,7 +750,7 @@ traced_noop_function
 canvas_to_data_url
 ```
 
-- [ ] **Step 2: Move WebGL code**
+- [x] **Step 2: Move WebGL code**
 
 Move these from `lib.rs` to `webapi/webgl.rs`:
 
@@ -762,7 +762,7 @@ webgl_get_supported_extensions
 webgl_get_parameter
 ```
 
-- [ ] **Step 3: Install constructors from webapi/mod.rs**
+- [x] **Step 3: Install constructors from webapi/mod.rs**
 
 Add:
 
@@ -778,7 +778,7 @@ canvas::install_canvas_constructor(scope, global);
 webgl::install_webgl_constructor(scope, global);
 ```
 
-- [ ] **Step 4: Update document createElement dependency**
+- [x] **Step 4: Update document createElement dependency**
 
 In `webapi/document.rs`, call:
 
@@ -788,7 +788,7 @@ crate::webapi::canvas::install_canvas_members(scope, element);
 
 when creating a `CANVAS` element.
 
-- [ ] **Step 5: Run canvas/WebGL tests**
+- [x] **Step 5: Run canvas/WebGL tests**
 
 Run:
 
@@ -799,7 +799,7 @@ cargo test -p obscura-native-runtime records_web_api_trace_events -- --test-thre
 
 Expected: both tests pass.
 
-- [ ] **Step 6: Run full smoke test**
+- [x] **Step 6: Run full smoke test**
 
 Run:
 
@@ -809,7 +809,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 Run:
 

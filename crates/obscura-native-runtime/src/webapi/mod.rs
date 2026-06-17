@@ -1,4 +1,5 @@
 pub(crate) mod base64;
+pub(crate) mod canvas;
 pub(crate) mod crypto;
 pub(crate) mod document;
 pub(crate) mod encoding;
@@ -6,6 +7,7 @@ pub(crate) mod location;
 pub(crate) mod navigator;
 pub(crate) mod screen;
 pub(crate) mod timers;
+pub(crate) mod webgl;
 pub(crate) mod window;
 
 use std::ffi::c_void;
@@ -20,7 +22,8 @@ pub(crate) fn install_browser_objects(scope: &mut v8::HandleScope, state_ptr: *m
     global.set_internal_field(0, external.into());
 
     window::install_window_constructor(scope, global);
-    crate::install_dom_constructors(scope, global);
+    canvas::install_canvas_constructor(scope, global);
+    webgl::install_webgl_constructor(scope, global);
     set_property(scope, global, "window", global.into());
     set_property(scope, global, "self", global.into());
     window::install_window_values(scope, global);
