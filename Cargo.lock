@@ -1637,6 +1637,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "obscura-native-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.2.17",
+ "obscura-dom",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "v8",
+]
+
+[[package]]
 name = "obscura-net"
 version = "0.1.0"
 dependencies = [

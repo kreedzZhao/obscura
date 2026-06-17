@@ -1,0 +1,1751 @@
+//! Native V8 runtime experiment for Obscura.
+
+use std::ffi::c_void;
+use std::sync::Once;
+
+use base64::Engine;
+use obscura_dom::{parse_html, DomTree, NodeData, NodeId};
+
+#[derive(Debug, Clone)]
+pub struct RuntimeOptions {
+    pub url: String,
+    pub user_agent: String,
+    pub platform: String,
+    pub language: String,
+    pub languages: Vec<String>,
+    pub hardware_concurrency: u32,
+    pub device_memory: u32,
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub color_depth: u32,
+    pub window_inner_width: u32,
+    pub window_inner_height: u32,
+    pub window_outer_width: u32,
+    pub window_outer_height: u32,
+    pub device_pixel_ratio: f64,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        RuntimeOptions {
+            url: "about:blank".to_string(),
+            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string(),
+            platform: "Win32".to_string(),
+            language: "en-US".to_string(),
+            languages: vec!["en-US".to_string(), "en".to_string()],
+            hardware_concurrency: 8,
+            device_memory: 8,
+            screen_width: 1920,
+            screen_height: 1080,
+            color_depth: 24,
+            window_inner_width: 1920,
+            window_inner_height: 1080,
+            window_outer_width: 1920,
+            window_outer_height: 1080,
+            device_pixel_ratio: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error("JavaScript compile error: {0}")]
+    Compile(String),
+    #[error("JavaScript runtime error: {0}")]
+    Runtime(String),
+    #[error("JavaScript value cannot be represented as JSON: {0}")]
+    Json(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceEvent {
+    pub target: String,
+    pub name: String,
+    pub kind: String,
+    pub args: Vec<String>,
+    pub result: Option<String>,
+}
+
+pub struct NativeRuntime {
+    isolate: v8::OwnedIsolate,
+    context: v8::Global<v8::Context>,
+    state: Box<NativeState>,
+}
+
+struct NativeState {
+    options: RuntimeOptions,
+    dom: DomTree,
+    title: String,
+    cookies: Vec<(String, String)>,
+    next_timer_id: u32,
+    timers: Vec<TimerTask>,
+    trace: Vec<TraceEvent>,
+}
+
+struct TimerTask {
+    id: u32,
+    callback: v8::Global<v8::Function>,
+    repeat: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AccessorSpec {
+    target: &'static str,
+    name: &'static str,
+    value: AccessorValue,
+    writable: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AccessorValue {
+    NavigatorUserAgent,
+    NavigatorAppVersion,
+    NavigatorPlatform,
+    NavigatorLanguage,
+    NavigatorLanguages,
+    NavigatorHardwareConcurrency,
+    NavigatorDeviceMemory,
+    NavigatorPlugins,
+    NavigatorMimeTypes,
+    LocationHref,
+    DocumentUrl,
+    DocumentTitle,
+    DocumentCookie,
+    ScreenWidth,
+    ScreenHeight,
+    ScreenAvailWidth,
+    ScreenAvailHeight,
+    ScreenColorDepth,
+    WindowDevicePixelRatio,
+    WindowInnerWidth,
+    WindowInnerHeight,
+    WindowOuterWidth,
+    WindowOuterHeight,
+    String(&'static str),
+    Bool(bool),
+    Null,
+    U32(u32),
+}
+
+const WINDOW_ACCESSORS: &[AccessorSpec] = &[
+    accessor(
+        "window",
+        "devicePixelRatio",
+        AccessorValue::WindowDevicePixelRatio,
+    ),
+    accessor("window", "innerWidth", AccessorValue::WindowInnerWidth),
+    accessor("window", "innerHeight", AccessorValue::WindowInnerHeight),
+    accessor("window", "outerWidth", AccessorValue::WindowOuterWidth),
+    accessor("window", "outerHeight", AccessorValue::WindowOuterHeight),
+];
+
+const NAVIGATOR_ACCESSORS: &[AccessorSpec] = &[
+    accessor("navigator", "userAgent", AccessorValue::NavigatorUserAgent),
+    accessor(
+        "navigator",
+        "appVersion",
+        AccessorValue::NavigatorAppVersion,
+    ),
+    accessor("navigator", "platform", AccessorValue::NavigatorPlatform),
+    accessor("navigator", "language", AccessorValue::NavigatorLanguage),
+    accessor("navigator", "languages", AccessorValue::NavigatorLanguages),
+    accessor("navigator", "webdriver", AccessorValue::Bool(false)),
+    accessor(
+        "navigator",
+        "hardwareConcurrency",
+        AccessorValue::NavigatorHardwareConcurrency,
+    ),
+    accessor(
+        "navigator",
+        "deviceMemory",
+        AccessorValue::NavigatorDeviceMemory,
+    ),
+    accessor("navigator", "cookieEnabled", AccessorValue::Bool(true)),
+    accessor("navigator", "maxTouchPoints", AccessorValue::U32(0)),
+    accessor("navigator", "vendor", AccessorValue::String("Google Inc.")),
+    accessor("navigator", "product", AccessorValue::String("Gecko")),
+    accessor("navigator", "productSub", AccessorValue::String("20030107")),
+    accessor("navigator", "doNotTrack", AccessorValue::Null),
+    accessor("navigator", "pdfViewerEnabled", AccessorValue::Bool(true)),
+    accessor("navigator", "onLine", AccessorValue::Bool(true)),
+    accessor("navigator", "plugins", AccessorValue::NavigatorPlugins),
+    accessor("navigator", "mimeTypes", AccessorValue::NavigatorMimeTypes),
+];
+
+const SCREEN_ACCESSORS: &[AccessorSpec] = &[
+    accessor("screen", "width", AccessorValue::ScreenWidth),
+    accessor("screen", "height", AccessorValue::ScreenHeight),
+    accessor("screen", "availWidth", AccessorValue::ScreenAvailWidth),
+    accessor("screen", "availHeight", AccessorValue::ScreenAvailHeight),
+    accessor("screen", "colorDepth", AccessorValue::ScreenColorDepth),
+    accessor("screen", "pixelDepth", AccessorValue::ScreenColorDepth),
+];
+
+const LOCATION_ACCESSORS: &[AccessorSpec] =
+    &[accessor("location", "href", AccessorValue::LocationHref)];
+
+const DOCUMENT_ACCESSORS: &[AccessorSpec] = &[
+    accessor("document", "URL", AccessorValue::DocumentUrl),
+    accessor("document", "title", AccessorValue::DocumentTitle),
+    accessor("document", "nodeType", AccessorValue::U32(9)),
+    AccessorSpec {
+        target: "document",
+        name: "cookie",
+        value: AccessorValue::DocumentCookie,
+        writable: true,
+    },
+];
+
+const CANVAS_2D_NOOP_METHODS: &[&str] = &[
+    "fillRect",
+    "fillText",
+    "strokeText",
+    "beginPath",
+    "closePath",
+    "moveTo",
+    "lineTo",
+    "arc",
+    "rect",
+    "fill",
+    "stroke",
+    "save",
+    "restore",
+    "translate",
+    "rotate",
+    "scale",
+    "setTransform",
+    "resetTransform",
+    "transform",
+    "clip",
+    "setLineDash",
+    "ellipse",
+    "roundRect",
+];
+
+const fn accessor(target: &'static str, name: &'static str, value: AccessorValue) -> AccessorSpec {
+    AccessorSpec {
+        target,
+        name,
+        value,
+        writable: false,
+    }
+}
+
+impl NativeRuntime {
+    pub fn new(options: RuntimeOptions) -> Self {
+        initialize_v8();
+
+        let mut state = Box::new(NativeState {
+            title: String::new(),
+            dom: DomTree::new(),
+            cookies: Vec::new(),
+            next_timer_id: 1,
+            timers: Vec::new(),
+            trace: Vec::new(),
+            options,
+        });
+        let state_ptr = state.as_mut() as *mut NativeState;
+
+        let mut isolate = v8::Isolate::new(Default::default());
+        isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+        let context = {
+            let scope = &mut v8::HandleScope::new(&mut isolate);
+            let global_template = create_global_template(scope);
+            let context = v8::Context::new(
+                scope,
+                v8::ContextOptions {
+                    global_template: Some(global_template),
+                    ..Default::default()
+                },
+            );
+            let scope = &mut v8::ContextScope::new(scope, context);
+            install_browser_objects(scope, state_ptr);
+            v8::Global::new(scope, context)
+        };
+
+        NativeRuntime {
+            isolate,
+            context,
+            state,
+        }
+    }
+
+    pub fn load_html(&mut self, html: &str) -> Result<(), RuntimeError> {
+        self.state.dom = parse_html(html);
+        self.state.title = self
+            .state
+            .dom
+            .query_selector("title")
+            .map_err(RuntimeError::Runtime)?
+            .map(|node_id| self.state.dom.text_content(node_id))
+            .unwrap_or_default();
+        Ok(())
+    }
+
+    pub fn eval_json(&mut self, source: &str) -> Result<serde_json::Value, RuntimeError> {
+        let result = {
+            let scope = &mut v8::HandleScope::new(&mut self.isolate);
+            let context = v8::Local::new(scope, &self.context);
+            let scope = &mut v8::ContextScope::new(scope, context);
+            let try_catch = &mut v8::TryCatch::new(scope);
+
+            let source = v8::String::new(try_catch, source).ok_or_else(|| {
+                RuntimeError::Compile("source is not a valid V8 string".to_string())
+            })?;
+            let script = v8::Script::compile(try_catch, source, None)
+                .ok_or_else(|| RuntimeError::Compile(exception_string(try_catch)))?;
+            let value = script
+                .run(try_catch)
+                .ok_or_else(|| RuntimeError::Runtime(exception_string(try_catch)))?;
+
+            v8_value_to_json(try_catch, value)
+        };
+        self.isolate.perform_microtask_checkpoint();
+        self.drain_event_loop()?;
+        result
+    }
+
+    pub fn drain_event_loop(&mut self) -> Result<(), RuntimeError> {
+        self.pump_v8_message_loop();
+        self.isolate.perform_microtask_checkpoint();
+        let tasks = std::mem::take(&mut self.state.timers);
+        if tasks.is_empty() {
+            self.pump_v8_message_loop();
+            self.isolate.perform_microtask_checkpoint();
+            return Ok(());
+        }
+
+        let mut repeating_tasks = Vec::new();
+        {
+            let scope = &mut v8::HandleScope::new(&mut self.isolate);
+            let context = v8::Local::new(scope, &self.context);
+            let scope = &mut v8::ContextScope::new(scope, context);
+            let try_catch = &mut v8::TryCatch::new(scope);
+            let receiver = context.global(try_catch);
+
+            for task in tasks {
+                let callback = v8::Local::new(try_catch, &task.callback);
+                callback
+                    .call(try_catch, receiver.into(), &[])
+                    .ok_or_else(|| RuntimeError::Runtime(exception_string(try_catch)))?;
+                if task.repeat {
+                    repeating_tasks.push(task);
+                }
+            }
+        }
+        self.state.timers.extend(repeating_tasks);
+        self.pump_v8_message_loop();
+        self.isolate.perform_microtask_checkpoint();
+        Ok(())
+    }
+
+    pub fn trace(&self) -> &[TraceEvent] {
+        &self.state.trace
+    }
+
+    pub fn take_trace(&mut self) -> Vec<TraceEvent> {
+        std::mem::take(&mut self.state.trace)
+    }
+
+    pub fn clear_trace(&mut self) {
+        self.state.trace.clear();
+    }
+
+    pub fn trace_json(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.state
+                .trace
+                .iter()
+                .map(|event| {
+                    serde_json::json!({
+                        "target": event.target,
+                        "name": event.name,
+                        "kind": event.kind,
+                        "args": event.args,
+                        "result": event.result,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn pump_v8_message_loop(&mut self) {
+        while v8::Platform::pump_message_loop(
+            &v8::V8::get_current_platform(),
+            &mut self.isolate,
+            false,
+        ) {}
+    }
+}
+
+fn initialize_v8() {
+    static START: Once = Once::new();
+    START.call_once(|| {
+        let platform = v8::new_default_platform(0, false).make_shared();
+        v8::V8::initialize_platform(platform);
+        v8::V8::initialize();
+    });
+}
+
+fn create_global_template<'s>(
+    scope: &mut v8::HandleScope<'s, ()>,
+) -> v8::Local<'s, v8::ObjectTemplate> {
+    let template = v8::ObjectTemplate::new(scope);
+    template.set_internal_field_count(1);
+    template
+}
+
+fn install_browser_objects(scope: &mut v8::HandleScope, state_ptr: *mut NativeState) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let external = v8::External::new(scope, state_ptr.cast::<c_void>());
+    global.set_internal_field(0, external.into());
+
+    install_window_constructor(scope, global);
+    install_dom_constructors(scope, global);
+    set_property(scope, global, "window", global.into());
+    set_property(scope, global, "self", global.into());
+    install_window_values(scope, global, state_ptr);
+    install_timer_functions(scope, global);
+    install_encoding(scope, global);
+    install_base64(scope, global);
+    install_crypto(scope, global);
+
+    let navigator = create_navigator(scope, state_ptr);
+    set_property(scope, global, "navigator", navigator.into());
+
+    let screen = create_screen(scope, state_ptr);
+    set_property(scope, global, "screen", screen.into());
+
+    let location = create_location(scope, state_ptr);
+    set_property(scope, global, "location", location.into());
+
+    let document = create_document(scope, state_ptr);
+    set_property(scope, global, "document", document.into());
+}
+
+fn install_window_constructor(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+    let key = v8::String::new(scope, "Window").unwrap();
+    let template = v8::FunctionTemplate::new(scope, window_constructor);
+    template.set_class_name(key);
+    let function = template.get_function(scope).unwrap();
+    global.set(scope, key.into(), function.into());
+
+    let prototype_key = v8::String::new(scope, "prototype").unwrap();
+    if let Some(prototype) = function.get(scope, prototype_key.into()) {
+        if let Ok(prototype) = v8::Local::<v8::Object>::try_from(prototype) {
+            global.set_prototype(scope, prototype.into());
+        }
+    }
+}
+
+fn install_dom_constructors(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+    install_constructor(
+        scope,
+        global,
+        "HTMLCanvasElement",
+        html_canvas_element_constructor,
+    );
+    install_constructor(
+        scope,
+        global,
+        "CanvasRenderingContext2D",
+        canvas_rendering_context_2d_constructor,
+    );
+    install_constructor(
+        scope,
+        global,
+        "WebGLRenderingContext",
+        webgl_rendering_context_constructor,
+    );
+}
+
+fn install_constructor(
+    scope: &mut v8::HandleScope,
+    global: v8::Local<v8::Object>,
+    name: &str,
+    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let template = v8::FunctionTemplate::new(scope, callback);
+    template.set_class_name(key);
+    let function = template.get_function(scope).unwrap();
+    global.set(scope, key.into(), function.into());
+}
+
+fn install_timer_functions(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+    set_function_property(scope, global, "setTimeout", set_timeout);
+    set_function_property(scope, global, "setInterval", set_interval);
+    set_function_property(scope, global, "clearTimeout", clear_timer);
+    set_function_property(scope, global, "clearInterval", clear_timer);
+}
+
+fn install_encoding(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+    install_encoding_constructor(
+        scope,
+        global,
+        "TextEncoder",
+        text_encoder_constructor,
+        "encode",
+        text_encoder_encode,
+    );
+    install_encoding_constructor(
+        scope,
+        global,
+        "TextDecoder",
+        text_decoder_constructor,
+        "decode",
+        text_decoder_decode,
+    );
+}
+
+fn install_base64(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+    set_function_property(scope, global, "atob", atob);
+    set_function_property(scope, global, "btoa", btoa);
+}
+
+fn install_crypto(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+    let crypto = v8::Object::new(scope);
+    set_traced_function_property(
+        scope,
+        crypto,
+        "crypto",
+        "getRandomValues",
+        crypto_get_random_values,
+    );
+    set_property(scope, global, "crypto", crypto.into());
+}
+
+fn install_encoding_constructor(
+    scope: &mut v8::HandleScope,
+    global: v8::Local<v8::Object>,
+    name: &str,
+    constructor_callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    method_name: &str,
+    method_callback: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let constructor = v8::FunctionTemplate::new(scope, constructor_callback);
+    constructor.set_class_name(v8::String::new(scope, name).unwrap());
+    let instance = constructor.instance_template(scope);
+    set_template_function(scope, instance, method_name, method_callback);
+    let function = constructor.get_function(scope).unwrap();
+    global.set(scope, key.into(), function.into());
+}
+
+fn install_window_values(
+    scope: &mut v8::HandleScope,
+    global: v8::Local<v8::Object>,
+    _state_ptr: *mut NativeState,
+) {
+    define_object_accessors(scope, global, WINDOW_ACCESSORS);
+}
+
+fn create_navigator<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    state_ptr: *mut NativeState,
+) -> v8::Local<'s, v8::Object> {
+    let template = v8::ObjectTemplate::new(scope);
+    template.set_internal_field_count(1);
+    define_template_accessors(scope, template, NAVIGATOR_ACCESSORS);
+    instantiate_with_state(scope, template, state_ptr)
+}
+
+fn create_screen<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    state_ptr: *mut NativeState,
+) -> v8::Local<'s, v8::Object> {
+    let template = v8::ObjectTemplate::new(scope);
+    template.set_internal_field_count(1);
+    define_template_accessors(scope, template, SCREEN_ACCESSORS);
+    instantiate_with_state(scope, template, state_ptr)
+}
+
+fn create_location<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    state_ptr: *mut NativeState,
+) -> v8::Local<'s, v8::Object> {
+    let template = v8::ObjectTemplate::new(scope);
+    template.set_internal_field_count(1);
+    define_template_accessors(scope, template, LOCATION_ACCESSORS);
+    instantiate_with_state(scope, template, state_ptr)
+}
+
+fn create_document<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    state_ptr: *mut NativeState,
+) -> v8::Local<'s, v8::Object> {
+    let template = v8::ObjectTemplate::new(scope);
+    template.set_internal_field_count(1);
+    define_template_accessors(scope, template, DOCUMENT_ACCESSORS);
+    set_traced_template_function(
+        scope,
+        template,
+        "document",
+        "querySelector",
+        document_query_selector,
+    );
+    set_traced_template_function(
+        scope,
+        template,
+        "document",
+        "createElement",
+        document_create_element,
+    );
+
+    let document = instantiate_with_state(scope, template, state_ptr);
+    let tag = v8::String::new(scope, "Document").unwrap();
+    let key = v8::Symbol::get_to_string_tag(scope);
+    document.set(scope, key.into(), tag.into());
+    document
+}
+
+fn create_element<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    state_ptr: *mut NativeState,
+    node_id: NodeId,
+) -> v8::Local<'s, v8::Object> {
+    let template = v8::ObjectTemplate::new(scope);
+    template.set_internal_field_count(2);
+    set_template_accessor(scope, template, "tagName", element_getter);
+    set_template_accessor(scope, template, "id", element_getter);
+    set_template_accessor(scope, template, "textContent", element_getter);
+    set_template_function(scope, template, "getAttribute", element_get_attribute);
+
+    let element = instantiate_with_state(scope, template, state_ptr);
+    let node_value = v8::Integer::new_from_unsigned(scope, node_id.raw());
+    element.set_internal_field(1, node_value.into());
+
+    let tag = v8::String::new(scope, "Element").unwrap();
+    let key = v8::Symbol::get_to_string_tag(scope);
+    element.set(scope, key.into(), tag.into());
+    element
+}
+
+fn instantiate_with_state<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    template: v8::Local<'s, v8::ObjectTemplate>,
+    state_ptr: *mut NativeState,
+) -> v8::Local<'s, v8::Object> {
+    let object = template.new_instance(scope).unwrap();
+    let external = v8::External::new(scope, state_ptr.cast::<c_void>());
+    object.set_internal_field(0, external.into());
+    object
+}
+
+fn set_template_accessor(
+    scope: &mut v8::HandleScope,
+    template: v8::Local<v8::ObjectTemplate>,
+    name: &str,
+    getter: impl v8::MapFnTo<v8::AccessorNameGetterCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    template.set_accessor(key.into(), getter);
+}
+
+fn define_template_accessors(
+    scope: &mut v8::HandleScope,
+    template: v8::Local<v8::ObjectTemplate>,
+    specs: &[AccessorSpec],
+) {
+    for spec in specs {
+        let key = v8::String::new(scope, spec.name).unwrap();
+        let data = binding_data(scope, spec.target, spec.name);
+        let mut config = v8::AccessorConfiguration::new(webapi_getter).data(data);
+        if spec.writable {
+            config = config.setter(webapi_setter);
+        }
+        template.set_accessor_with_configuration(key.into(), config);
+    }
+}
+
+fn define_object_accessors(
+    scope: &mut v8::HandleScope,
+    object: v8::Local<v8::Object>,
+    specs: &[AccessorSpec],
+) {
+    for spec in specs {
+        let key = v8::String::new(scope, spec.name).unwrap();
+        let data = binding_data(scope, spec.target, spec.name);
+        let mut config = v8::AccessorConfiguration::new(webapi_getter).data(data);
+        if spec.writable {
+            config = config.setter(webapi_setter);
+        }
+        object.set_accessor_with_configuration(scope, key.into(), config);
+    }
+}
+
+fn set_template_function(
+    scope: &mut v8::HandleScope,
+    template: v8::Local<v8::ObjectTemplate>,
+    name: &str,
+    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::FunctionTemplate::new(scope, callback);
+    template.set(key.into(), function.into());
+}
+
+fn set_traced_template_function(
+    scope: &mut v8::HandleScope,
+    template: v8::Local<v8::ObjectTemplate>,
+    target: &str,
+    name: &str,
+    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let data = binding_data(scope, target, name);
+    let function = v8::FunctionTemplate::builder(callback)
+        .data(data)
+        .constructor_behavior(v8::ConstructorBehavior::Throw)
+        .build(scope);
+    template.set(key.into(), function.into());
+}
+
+fn set_function_property(
+    scope: &mut v8::HandleScope,
+    object: v8::Local<v8::Object>,
+    name: &str,
+    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let template = v8::FunctionTemplate::new(scope, callback);
+    let function = template.get_function(scope).unwrap();
+    object.set(scope, key.into(), function.into());
+}
+
+fn set_traced_function_property(
+    scope: &mut v8::HandleScope,
+    object: v8::Local<v8::Object>,
+    target: &str,
+    name: &str,
+    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let data = binding_data(scope, target, name);
+    let template = v8::FunctionTemplate::builder(callback)
+        .data(data)
+        .constructor_behavior(v8::ConstructorBehavior::Throw)
+        .build(scope);
+    let function = template.get_function(scope).unwrap();
+    object.set(scope, key.into(), function.into());
+}
+
+fn set_property(
+    scope: &mut v8::HandleScope,
+    object: v8::Local<v8::Object>,
+    key: &str,
+    value: v8::Local<v8::Value>,
+) {
+    let key = v8::String::new(scope, key).unwrap();
+    object.set(scope, key.into(), value);
+}
+
+fn record_trace(
+    scope: &mut v8::HandleScope,
+    target: &str,
+    name: &str,
+    kind: &str,
+    args: Vec<String>,
+    result: Option<String>,
+) {
+    let global = scope.get_current_context().global(scope);
+    let state = unsafe { &mut *state_ptr(scope, global) };
+    state.trace.push(TraceEvent {
+        target: target.to_string(),
+        name: name.to_string(),
+        kind: kind.to_string(),
+        args,
+        result,
+    });
+}
+
+fn record_function_trace(
+    scope: &mut v8::HandleScope,
+    args: &v8::FunctionCallbackArguments,
+    call_args: Vec<String>,
+    result: Option<String>,
+) {
+    let (target, name) = binding_from_data(scope, args.data())
+        .unwrap_or_else(|| ("unknown".to_string(), "anonymous".to_string()));
+    record_trace(scope, &target, &name, "call", call_args, result);
+}
+
+fn trace_args(scope: &mut v8::HandleScope, args: &v8::FunctionCallbackArguments) -> Vec<String> {
+    let mut values = Vec::new();
+    for index in 0..args.length() {
+        values.push(trace_value(scope, args.get(index)));
+    }
+    values
+}
+
+fn trace_value(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> String {
+    if value.is_null() {
+        return "null".to_string();
+    }
+    if value.is_undefined() {
+        return "undefined".to_string();
+    }
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
+        return format!("ArrayBufferView({})", view.byte_length());
+    }
+    value
+        .to_string(scope)
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "[unprintable]".to_string())
+}
+
+fn binding_data<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    target: &str,
+    name: &str,
+) -> v8::Local<'s, v8::Value> {
+    v8_str(scope, &format!("{target}\u{1f}{name}")).into()
+}
+
+fn binding_from_data(
+    scope: &mut v8::HandleScope,
+    data: v8::Local<v8::Value>,
+) -> Option<(String, String)> {
+    let data = data.to_string(scope)?.to_rust_string_lossy(scope);
+    let (target, name) = data.split_once('\u{1f}')?;
+    Some((target.to_string(), name.to_string()))
+}
+
+fn find_accessor_spec(target: &str, name: &str) -> Option<&'static AccessorSpec> {
+    [
+        WINDOW_ACCESSORS,
+        NAVIGATOR_ACCESSORS,
+        SCREEN_ACCESSORS,
+        LOCATION_ACCESSORS,
+        DOCUMENT_ACCESSORS,
+    ]
+    .into_iter()
+    .flat_map(|specs| specs.iter())
+    .find(|spec| spec.target == target && spec.name == name)
+}
+
+fn webapi_getter(
+    scope: &mut v8::HandleScope,
+    key: v8::Local<v8::Name>,
+    args: v8::PropertyCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let key = key.to_string(scope).unwrap().to_rust_string_lossy(scope);
+    let (target, name) = binding_from_data(scope, args.data())
+        .unwrap_or_else(|| ("unknown".to_string(), key.clone()));
+    let Some(spec) = find_accessor_spec(&target, &name) else {
+        record_trace(scope, &target, &name, "get-miss", vec![], None);
+        return;
+    };
+
+    let state = unsafe { &*state_ptr(scope, args.holder()) };
+    let (value, result) = accessor_value_to_v8(scope, state, spec.value);
+    record_trace(scope, spec.target, spec.name, "get", vec![], Some(result));
+    rv.set(value);
+}
+
+fn webapi_setter(
+    scope: &mut v8::HandleScope,
+    key: v8::Local<v8::Name>,
+    value: v8::Local<v8::Value>,
+    args: v8::PropertyCallbackArguments,
+    _rv: v8::ReturnValue<()>,
+) {
+    let key = key.to_string(scope).unwrap().to_rust_string_lossy(scope);
+    let (target, name) = binding_from_data(scope, args.data())
+        .unwrap_or_else(|| ("unknown".to_string(), key.clone()));
+    let value = value.to_rust_string_lossy(scope);
+    record_trace(
+        scope,
+        &target,
+        &name,
+        "set",
+        vec![value.clone()],
+        Some(value.clone()),
+    );
+
+    match (target.as_str(), name.as_str()) {
+        ("document", "cookie") => {
+            let state = unsafe { &mut *state_ptr(scope, args.holder()) };
+            set_document_cookie(state, &value);
+        }
+        _ => {}
+    }
+}
+
+fn accessor_value_to_v8<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    state: &NativeState,
+    value: AccessorValue,
+) -> (v8::Local<'s, v8::Value>, String) {
+    match value {
+        AccessorValue::NavigatorUserAgent => {
+            let value = state.options.user_agent.clone();
+            (v8_str(scope, &value).into(), value)
+        }
+        AccessorValue::NavigatorAppVersion => {
+            let value = state
+                .options
+                .user_agent
+                .strip_prefix("Mozilla/")
+                .unwrap_or(&state.options.user_agent)
+                .to_string();
+            (v8_str(scope, &value).into(), value)
+        }
+        AccessorValue::NavigatorPlatform => {
+            let value = state.options.platform.clone();
+            (v8_str(scope, &value).into(), value)
+        }
+        AccessorValue::NavigatorLanguage => {
+            let value = state.options.language.clone();
+            (v8_str(scope, &value).into(), value)
+        }
+        AccessorValue::NavigatorLanguages => {
+            let values = state.options.languages.clone();
+            let array = v8::Array::new(scope, values.len() as i32);
+            for (index, value) in values.iter().enumerate() {
+                let value = v8_str(scope, value);
+                array.set_index(scope, index as u32, value.into());
+            }
+            (array.into(), format!("{values:?}"))
+        }
+        AccessorValue::NavigatorHardwareConcurrency => {
+            let value = state.options.hardware_concurrency;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::NavigatorDeviceMemory => {
+            let value = state.options.device_memory;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::NavigatorPlugins => {
+            let plugins = [
+                "PDF Viewer",
+                "Chrome PDF Viewer",
+                "Chromium PDF Viewer",
+                "Microsoft Edge PDF Viewer",
+                "WebKit built-in PDF",
+            ];
+            let array = v8::Array::new(scope, plugins.len() as i32);
+            for (index, name) in plugins.iter().enumerate() {
+                let plugin = create_plugin_object(scope, name);
+                array.set_index(scope, index as u32, plugin.into());
+            }
+            (array.into(), "Array(5)".to_string())
+        }
+        AccessorValue::NavigatorMimeTypes => {
+            let mime_types = ["application/pdf", "text/pdf"];
+            let array = v8::Array::new(scope, mime_types.len() as i32);
+            for (index, name) in mime_types.iter().enumerate() {
+                let mime_type = create_mime_type_object(scope, name);
+                array.set_index(scope, index as u32, mime_type.into());
+            }
+            (array.into(), "Array(2)".to_string())
+        }
+        AccessorValue::LocationHref | AccessorValue::DocumentUrl => {
+            let value = state.options.url.clone();
+            (v8_str(scope, &value).into(), value)
+        }
+        AccessorValue::DocumentTitle => {
+            let value = state.title.clone();
+            (v8_str(scope, &value).into(), value)
+        }
+        AccessorValue::DocumentCookie => {
+            let value = document_cookie(state);
+            (v8_str(scope, &value).into(), value)
+        }
+        AccessorValue::ScreenWidth => {
+            let value = state.options.screen_width;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::ScreenHeight => {
+            let value = state.options.screen_height;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::ScreenAvailWidth => {
+            let value = state.options.screen_width;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::ScreenAvailHeight => {
+            let value = state.options.screen_height.saturating_sub(40);
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::ScreenColorDepth => {
+            let value = state.options.color_depth;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::WindowDevicePixelRatio => {
+            let value = state.options.device_pixel_ratio;
+            (v8::Number::new(scope, value).into(), value.to_string())
+        }
+        AccessorValue::WindowInnerWidth => {
+            let value = state.options.window_inner_width;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::WindowInnerHeight => {
+            let value = state.options.window_inner_height;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::WindowOuterWidth => {
+            let value = state.options.window_outer_width;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::WindowOuterHeight => {
+            let value = state.options.window_outer_height;
+            (
+                v8::Integer::new_from_unsigned(scope, value).into(),
+                value.to_string(),
+            )
+        }
+        AccessorValue::String(value) => (v8_str(scope, value).into(), value.to_string()),
+        AccessorValue::Bool(value) => (v8::Boolean::new(scope, value).into(), value.to_string()),
+        AccessorValue::Null => (v8::null(scope).into(), "null".to_string()),
+        AccessorValue::U32(value) => (
+            v8::Integer::new_from_unsigned(scope, value).into(),
+            value.to_string(),
+        ),
+    }
+}
+
+fn create_plugin_object<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    name: &str,
+) -> v8::Local<'s, v8::Object> {
+    let plugin = v8::Object::new(scope);
+    let name_value = v8_str(scope, name);
+    set_property(scope, plugin, "name", name_value.into());
+    let filename = v8_str(scope, "internal-pdf-viewer");
+    set_property(scope, plugin, "filename", filename.into());
+    let description = v8_str(scope, "Portable Document Format");
+    set_property(scope, plugin, "description", description.into());
+    let length = v8::Integer::new(scope, 1);
+    set_property(scope, plugin, "length", length.into());
+    let tag = v8::String::new(scope, "Plugin").unwrap();
+    let key = v8::Symbol::get_to_string_tag(scope);
+    plugin.set(scope, key.into(), tag.into());
+    plugin
+}
+
+fn create_mime_type_object<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    mime_type: &str,
+) -> v8::Local<'s, v8::Object> {
+    let object = v8::Object::new(scope);
+    let type_value = v8_str(scope, mime_type);
+    set_property(scope, object, "type", type_value.into());
+    let description = v8_str(scope, "Portable Document Format");
+    set_property(scope, object, "description", description.into());
+    let suffixes = v8_str(scope, "pdf");
+    set_property(scope, object, "suffixes", suffixes.into());
+    let enabled_plugin = v8::null(scope);
+    set_property(scope, object, "enabledPlugin", enabled_plugin.into());
+    let tag = v8::String::new(scope, "MimeType").unwrap();
+    let key = v8::Symbol::get_to_string_tag(scope);
+    object.set(scope, key.into(), tag.into());
+    object
+}
+
+fn window_constructor(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let global = scope.get_current_context().global(scope);
+    rv.set(global.into());
+}
+
+fn html_canvas_element_constructor(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if args.is_construct_call() {
+        rv.set(args.this().into());
+        return;
+    }
+    let canvas = create_canvas_element(scope);
+    rv.set(canvas.into());
+}
+
+fn canvas_rendering_context_2d_constructor(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if args.is_construct_call() {
+        rv.set(args.this().into());
+        return;
+    }
+    let context = create_canvas_context(scope);
+    rv.set(context.into());
+}
+
+fn webgl_rendering_context_constructor(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if args.is_construct_call() {
+        rv.set(args.this().into());
+        return;
+    }
+    let context = create_webgl_context(scope);
+    rv.set(context.into());
+}
+
+fn set_timeout(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let id = allocate_timer(scope, args.get(0), false);
+    rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+}
+
+fn set_interval(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let id = allocate_timer(scope, args.get(0), true);
+    rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+}
+
+fn allocate_timer(
+    scope: &mut v8::HandleScope,
+    callback_value: v8::Local<v8::Value>,
+    repeat: bool,
+) -> u32 {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let callback = v8::Local::<v8::Function>::try_from(callback_value)
+        .ok()
+        .map(|callback| v8::Global::new(scope, callback));
+    let state = unsafe { &mut *state_ptr(scope, global) };
+    let id = state.next_timer_id;
+    state.next_timer_id = state.next_timer_id.saturating_add(1);
+    if let Some(callback) = callback {
+        state.timers.push(TimerTask {
+            id,
+            callback,
+            repeat,
+        });
+    }
+    id
+}
+
+fn clear_timer(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let state = unsafe { &mut *state_ptr(scope, global) };
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    state.timers.retain(|timer| timer.id != id);
+}
+
+fn atob(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let input = args.get(0).to_rust_string_lossy(scope);
+    match base64::engine::general_purpose::STANDARD.decode(input.as_bytes()) {
+        Ok(bytes) => {
+            let output: String = bytes.into_iter().map(char::from).collect();
+            rv.set(v8_str(scope, &output).into());
+        }
+        Err(error) => {
+            let message = v8_str(scope, &error.to_string());
+            let exception = v8::Exception::type_error(scope, message);
+            scope.throw_exception(exception);
+        }
+    }
+}
+
+fn btoa(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let input = args.get(0).to_rust_string_lossy(scope);
+    let bytes = input.chars().map(|ch| ch as u8).collect::<Vec<_>>();
+    let output = base64::engine::general_purpose::STANDARD.encode(bytes);
+    rv.set(v8_str(scope, &output).into());
+}
+
+fn crypto_get_random_values(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let value = args.get(0);
+    let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) else {
+        let message = v8_str(scope, "getRandomValues expects an ArrayBufferView");
+        let exception = v8::Exception::type_error(scope, message);
+        scope.throw_exception(exception);
+        return;
+    };
+
+    let length = view.byte_length();
+    let data = view.data().cast::<u8>();
+    let mut bytes = vec![0; length];
+    if let Err(error) = getrandom::getrandom(&mut bytes) {
+        let message = v8_str(scope, &error.to_string());
+        let exception = v8::Exception::type_error(scope, message);
+        scope.throw_exception(exception);
+        return;
+    }
+    for (index, byte) in bytes.into_iter().enumerate() {
+        unsafe {
+            data.add(index).write(byte);
+        }
+    }
+    record_function_trace(
+        scope,
+        &args,
+        vec![format!("ArrayBufferView({length})")],
+        Some(format!("ArrayBufferView({length})")),
+    );
+    rv.set(value);
+}
+
+fn text_encoder_constructor(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if args.is_construct_call() {
+        rv.set(args.this().into());
+        return;
+    }
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let key = v8::String::new(scope, "TextEncoder").unwrap();
+    if let Some(value) = global.get(scope, key.into()) {
+        if let Ok(function) = v8::Local::<v8::Function>::try_from(value) {
+            if let Some(instance) = function.new_instance(scope, &[]) {
+                rv.set(instance.into());
+            }
+        }
+    }
+}
+
+fn text_decoder_constructor(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if args.is_construct_call() {
+        rv.set(args.this().into());
+        return;
+    }
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let key = v8::String::new(scope, "TextDecoder").unwrap();
+    if let Some(value) = global.get(scope, key.into()) {
+        if let Ok(function) = v8::Local::<v8::Function>::try_from(value) {
+            if let Some(instance) = function.new_instance(scope, &[]) {
+                rv.set(instance.into());
+            }
+        }
+    }
+}
+
+fn text_encoder_encode(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let input = args.get(0).to_rust_string_lossy(scope);
+    let bytes = input.into_bytes();
+    let length = bytes.len();
+    let backing_store = v8::ArrayBuffer::new_backing_store_from_bytes(bytes).make_shared();
+    let buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+    if let Some(array) = v8::Uint8Array::new(scope, buffer, 0, length) {
+        rv.set(array.into());
+    }
+}
+
+fn text_decoder_decode(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let value = args.get(0);
+    let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) else {
+        rv.set(v8_str(scope, "").into());
+        return;
+    };
+    let mut bytes = vec![0; view.byte_length()];
+    let copied = view.copy_contents(&mut bytes);
+    bytes.truncate(copied);
+    let decoded = String::from_utf8_lossy(&bytes);
+    rv.set(v8_str(scope, decoded.as_ref()).into());
+}
+
+fn document_query_selector(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let selector = args.get(0).to_rust_string_lossy(scope);
+    let trace_args = trace_args(scope, &args);
+    let state_ptr = state_ptr(scope, args.this());
+    let state = unsafe { &mut *state_ptr };
+    match state.dom.query_selector(&selector) {
+        Ok(Some(node_id)) => {
+            let element = create_element(scope, state_ptr, node_id);
+            record_function_trace(scope, &args, trace_args, Some("Element".to_string()));
+            rv.set(element.into());
+        }
+        Ok(None) => {
+            record_function_trace(scope, &args, trace_args, Some("null".to_string()));
+            rv.set(v8::null(scope).into());
+        }
+        Err(message) => {
+            let message = v8_str(scope, &message);
+            let exception = v8::Exception::type_error(scope, message);
+            scope.throw_exception(exception);
+        }
+    }
+}
+
+fn document_create_element(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let tag_name = args.get(0).to_rust_string_lossy(scope);
+    let trace_args = trace_args(scope, &args);
+    let element = v8::Object::new(scope);
+    let tag_name = tag_name.to_ascii_uppercase();
+    let tag_value = v8_str(scope, &tag_name);
+    set_property(scope, element, "tagName", tag_value.into());
+    let node_type = v8::Integer::new(scope, 1);
+    set_property(scope, element, "nodeType", node_type.into());
+
+    if tag_name == "CANVAS" {
+        install_canvas_members(scope, element);
+    }
+
+    let tag = v8::String::new(scope, "Element").unwrap();
+    let key = v8::Symbol::get_to_string_tag(scope);
+    element.set(scope, key.into(), tag.into());
+    record_function_trace(scope, &args, trace_args, Some(tag_name));
+    rv.set(element.into());
+}
+
+fn create_canvas_element<'s>(scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::Object> {
+    let element = v8::Object::new(scope);
+    let tag_value = v8_str(scope, "CANVAS");
+    set_property(scope, element, "tagName", tag_value.into());
+    let node_type = v8::Integer::new(scope, 1);
+    set_property(scope, element, "nodeType", node_type.into());
+    install_canvas_members(scope, element);
+    element
+}
+
+fn install_canvas_members(scope: &mut v8::HandleScope, element: v8::Local<v8::Object>) {
+    set_traced_function_property(
+        scope,
+        element,
+        "HTMLCanvasElement",
+        "getContext",
+        canvas_get_context,
+    );
+    set_traced_function_property(
+        scope,
+        element,
+        "HTMLCanvasElement",
+        "toDataURL",
+        canvas_to_data_url,
+    );
+
+    let global = scope.get_current_context().global(scope);
+    let constructor_key = v8::String::new(scope, "HTMLCanvasElement").unwrap();
+    if let Some(constructor) = global.get(scope, constructor_key.into()) {
+        if let Ok(constructor) = v8::Local::<v8::Function>::try_from(constructor) {
+            let prototype_key = v8::String::new(scope, "prototype").unwrap();
+            if let Some(prototype) = constructor.get(scope, prototype_key.into()) {
+                if let Ok(prototype) = v8::Local::<v8::Object>::try_from(prototype) {
+                    element.set_prototype(scope, prototype.into());
+                }
+            }
+        }
+    }
+}
+
+fn canvas_get_context(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let kind = args.get(0).to_rust_string_lossy(scope);
+    let trace_args = trace_args(scope, &args);
+    if kind.eq_ignore_ascii_case("webgl") || kind.eq_ignore_ascii_case("experimental-webgl") {
+        let context = create_webgl_context(scope);
+        record_function_trace(
+            scope,
+            &args,
+            trace_args,
+            Some("WebGLRenderingContext".to_string()),
+        );
+        rv.set(context.into());
+    } else {
+        let context = create_canvas_context(scope);
+        record_function_trace(
+            scope,
+            &args,
+            trace_args,
+            Some("CanvasRenderingContext2D".to_string()),
+        );
+        rv.set(context.into());
+    }
+}
+
+fn create_canvas_context<'s>(scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::Object> {
+    let context = v8::Object::new(scope);
+    for name in CANVAS_2D_NOOP_METHODS {
+        set_traced_function_property(
+            scope,
+            context,
+            "CanvasRenderingContext2D",
+            name,
+            traced_noop_function,
+        );
+    }
+    let global = scope.get_current_context().global(scope);
+    let constructor_key = v8::String::new(scope, "CanvasRenderingContext2D").unwrap();
+    if let Some(constructor) = global.get(scope, constructor_key.into()) {
+        if let Ok(constructor) = v8::Local::<v8::Function>::try_from(constructor) {
+            let prototype_key = v8::String::new(scope, "prototype").unwrap();
+            if let Some(prototype) = constructor.get(scope, prototype_key.into()) {
+                if let Ok(prototype) = v8::Local::<v8::Object>::try_from(prototype) {
+                    context.set_prototype(scope, prototype.into());
+                }
+            }
+        }
+    }
+    context
+}
+
+fn create_webgl_context<'s>(scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::Object> {
+    let context = v8::Object::new(scope);
+    set_traced_function_property(
+        scope,
+        context,
+        "WebGLRenderingContext",
+        "getExtension",
+        webgl_get_extension,
+    );
+    set_traced_function_property(
+        scope,
+        context,
+        "WebGLRenderingContext",
+        "getSupportedExtensions",
+        webgl_get_supported_extensions,
+    );
+    set_traced_function_property(
+        scope,
+        context,
+        "WebGLRenderingContext",
+        "getParameter",
+        webgl_get_parameter,
+    );
+    let global = scope.get_current_context().global(scope);
+    let constructor_key = v8::String::new(scope, "WebGLRenderingContext").unwrap();
+    if let Some(constructor) = global.get(scope, constructor_key.into()) {
+        if let Ok(constructor) = v8::Local::<v8::Function>::try_from(constructor) {
+            let prototype_key = v8::String::new(scope, "prototype").unwrap();
+            if let Some(prototype) = constructor.get(scope, prototype_key.into()) {
+                if let Ok(prototype) = v8::Local::<v8::Object>::try_from(prototype) {
+                    context.set_prototype(scope, prototype.into());
+                }
+            }
+        }
+    }
+    context
+}
+
+fn webgl_get_extension(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let name = args.get(0).to_rust_string_lossy(scope);
+    if name != "WEBGL_debug_renderer_info" {
+        record_function_trace(scope, &args, vec![name], Some("null".to_string()));
+        rv.set(v8::null(scope).into());
+        return;
+    }
+
+    let extension = v8::Object::new(scope);
+    let vendor = v8::Integer::new_from_unsigned(scope, 0x9245);
+    set_property(scope, extension, "UNMASKED_VENDOR_WEBGL", vendor.into());
+    let renderer = v8::Integer::new_from_unsigned(scope, 0x9246);
+    set_property(scope, extension, "UNMASKED_RENDERER_WEBGL", renderer.into());
+    record_function_trace(
+        scope,
+        &args,
+        vec![name],
+        Some("WEBGL_debug_renderer_info".to_string()),
+    );
+    rv.set(extension.into());
+}
+
+fn webgl_get_supported_extensions(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let array = v8::Array::new(scope, 0);
+    record_function_trace(scope, &args, vec![], Some("Array(0)".to_string()));
+    rv.set(array.into());
+}
+
+fn webgl_get_parameter(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let parameter = args.get(0).uint32_value(scope).unwrap_or(0);
+    let result = match parameter {
+        0x1f00 | 0x9245 => {
+            let value = "Google Inc. (NVIDIA)";
+            record_function_trace(
+                scope,
+                &args,
+                vec![parameter.to_string()],
+                Some(value.to_string()),
+            );
+            v8_str(scope, value).into()
+        }
+        0x1f01 | 0x9246 => {
+            let value =
+                "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 (0x00001F82) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+            record_function_trace(
+                scope,
+                &args,
+                vec![parameter.to_string()],
+                Some(value.to_string()),
+            );
+            v8_str(scope, value).into()
+        }
+        0x1f02 => {
+            let value = "WebGL 1.0 (OpenGL ES 2.0 Chromium)";
+            record_function_trace(
+                scope,
+                &args,
+                vec![parameter.to_string()],
+                Some(value.to_string()),
+            );
+            v8_str(scope, value).into()
+        }
+        0x8b8c => {
+            let value = "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)";
+            record_function_trace(
+                scope,
+                &args,
+                vec![parameter.to_string()],
+                Some(value.to_string()),
+            );
+            v8_str(scope, value).into()
+        }
+        _ => {
+            record_function_trace(
+                scope,
+                &args,
+                vec![parameter.to_string()],
+                Some("0".to_string()),
+            );
+            v8::Integer::new(scope, 0).into()
+        }
+    };
+    rv.set(result);
+}
+
+fn traced_noop_function(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let trace_args = trace_args(scope, &args);
+    record_function_trace(scope, &args, trace_args, None);
+}
+
+fn canvas_to_data_url(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    record_function_trace(scope, &args, vec![], Some(String::new()));
+    rv.set(v8_str(scope, "").into());
+}
+
+fn element_getter(
+    scope: &mut v8::HandleScope,
+    key: v8::Local<v8::Name>,
+    args: v8::PropertyCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let element = args.this();
+    let state = unsafe { &mut *state_ptr(scope, element) };
+    let node_id = element_node_id(scope, element);
+    let key = key.to_string(scope).unwrap().to_rust_string_lossy(scope);
+
+    match key.as_str() {
+        "tagName" => {
+            if let Some(tag_name) = element_tag_name(state, node_id) {
+                rv.set(v8_str(scope, &tag_name).into());
+            }
+        }
+        "id" => {
+            let id = element_attribute(state, node_id, "id").unwrap_or_default();
+            rv.set(v8_str(scope, &id).into());
+        }
+        "textContent" => {
+            let text = state.dom.text_content(node_id);
+            rv.set(v8_str(scope, &text).into());
+        }
+        _ => {}
+    }
+}
+
+fn element_get_attribute(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let element = args.this();
+    let state = unsafe { &mut *state_ptr(scope, element) };
+    let node_id = element_node_id(scope, element);
+
+    match element_attribute(state, node_id, &name) {
+        Some(value) => rv.set(v8_str(scope, &value).into()),
+        None => rv.set(v8::null(scope).into()),
+    }
+}
+
+fn state_ptr(scope: &mut v8::HandleScope, object: v8::Local<v8::Object>) -> *mut NativeState {
+    let external = object
+        .get_internal_field(scope, 0)
+        .unwrap()
+        .cast::<v8::External>();
+    external.value() as *mut NativeState
+}
+
+fn element_node_id(scope: &mut v8::HandleScope, object: v8::Local<v8::Object>) -> NodeId {
+    let value: v8::Local<v8::Value> = object
+        .get_internal_field(scope, 1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    NodeId::new(value.uint32_value(scope).unwrap())
+}
+
+fn element_tag_name(state: &NativeState, node_id: NodeId) -> Option<String> {
+    state.dom.with_node(node_id, |node| match &node.data {
+        NodeData::Element { name, .. } => Some(name.local.as_ref().to_ascii_uppercase()),
+        _ => None,
+    })?
+}
+
+fn element_attribute(state: &NativeState, node_id: NodeId, name: &str) -> Option<String> {
+    state.dom.with_node(node_id, |node| {
+        node.get_attribute(name).map(ToOwned::to_owned)
+    })?
+}
+
+fn document_cookie(state: &NativeState) -> String {
+    state
+        .cookies
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn set_document_cookie(state: &mut NativeState, cookie: &str) {
+    let Some(pair) = cookie.split(';').next() else {
+        return;
+    };
+    let Some((name, value)) = pair.split_once('=') else {
+        return;
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let value = value.trim();
+    if let Some((_, existing)) = state.cookies.iter_mut().find(|(item, _)| item == name) {
+        *existing = value.to_string();
+    } else {
+        state.cookies.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn v8_str<'s>(scope: &mut v8::HandleScope<'s>, value: &str) -> v8::Local<'s, v8::String> {
+    v8::String::new(scope, value).unwrap()
+}
+
+fn v8_value_to_json(
+    scope: &mut v8::HandleScope,
+    value: v8::Local<v8::Value>,
+) -> Result<serde_json::Value, RuntimeError> {
+    if value.is_undefined() {
+        return Ok(serde_json::Value::Null);
+    }
+
+    let global = scope.get_current_context().global(scope);
+    let json_key = v8::String::new(scope, "JSON").unwrap();
+    let json = global.get(scope, json_key.into()).unwrap();
+    let json = v8::Local::<v8::Object>::try_from(json)
+        .map_err(|_| RuntimeError::Json("global JSON is not an object".to_string()))?;
+    let stringify_key = v8::String::new(scope, "stringify").unwrap();
+    let stringify = json.get(scope, stringify_key.into()).unwrap();
+    let stringify = v8::Local::<v8::Function>::try_from(stringify)
+        .map_err(|_| RuntimeError::Json("JSON.stringify is not a function".to_string()))?;
+    let json_value = stringify
+        .call(scope, json.into(), &[value])
+        .ok_or_else(|| RuntimeError::Json("JSON.stringify failed".to_string()))?;
+
+    if json_value.is_undefined() {
+        return Ok(serde_json::Value::Null);
+    }
+
+    let json_string = json_value
+        .to_string(scope)
+        .ok_or_else(|| RuntimeError::Json("JSON.stringify did not return a string".to_string()))?
+        .to_rust_string_lossy(scope);
+    serde_json::from_str(&json_string).map_err(|err| RuntimeError::Json(err.to_string()))
+}
+
+fn exception_string<P>(_scope: &mut v8::TryCatch<P>) -> String {
+    "unknown exception".to_string()
+}
