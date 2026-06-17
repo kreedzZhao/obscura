@@ -532,7 +532,7 @@ git commit -m "refactor: split core browser api modules"
 - Produces: document cookie helpers
 - Produces: DOM element wrapper helpers
 
-- [ ] **Step 1: Move document code**
+- [x] **Step 1: Move document code**
 
 Move these from `lib.rs` into `webapi/document.rs`:
 
@@ -553,7 +553,7 @@ document_create_element
 
 Make only `create_document`, `document_cookie`, and `set_document_cookie` `pub(crate)` if other modules need them.
 
-- [ ] **Step 2: Update bindings setter dependency**
+- [x] **Step 2: Update bindings setter dependency**
 
 If `bindings::webapi_setter` needs `set_document_cookie`, call it through:
 
@@ -561,7 +561,7 @@ If `bindings::webapi_setter` needs `set_document_cookie`, call it through:
 crate::webapi::document::set_document_cookie(state, &value);
 ```
 
-- [ ] **Step 3: Install document from webapi/mod.rs**
+- [x] **Step 3: Install document from webapi/mod.rs**
 
 Add to `webapi/mod.rs`:
 
@@ -576,7 +576,7 @@ let document = document::create_document(scope, state_ptr);
 set_property(scope, global, "document", document.into());
 ```
 
-- [ ] **Step 4: Run DOM tests**
+- [x] **Step 4: Run DOM tests**
 
 Run:
 
@@ -588,7 +588,7 @@ cargo test -p obscura-native-runtime exposes_track17_fingerprint_environment -- 
 
 Expected: all listed tests pass.
 
-- [ ] **Step 5: Run full smoke test**
+- [x] **Step 5: Run full smoke test**
 
 Run:
 
@@ -598,7 +598,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 

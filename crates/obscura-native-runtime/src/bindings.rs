@@ -188,7 +188,7 @@ fn find_accessor_spec(target: &str, name: &str) -> Option<&'static AccessorSpec>
         crate::webapi::navigator::NAVIGATOR_ACCESSORS,
         crate::webapi::screen::SCREEN_ACCESSORS,
         crate::webapi::location::LOCATION_ACCESSORS,
-        crate::DOCUMENT_ACCESSORS,
+        crate::webapi::document::DOCUMENT_ACCESSORS,
     ]
     .into_iter()
     .flat_map(|specs| specs.iter())
@@ -237,7 +237,7 @@ fn webapi_setter(
 
     if let ("document", "cookie") = (target.as_str(), name.as_str()) {
         let state = unsafe { &mut *state_ptr(scope, args.holder()) };
-        crate::set_document_cookie(state, &value);
+        crate::webapi::document::set_document_cookie(state, &value);
     }
 }
 
@@ -324,7 +324,7 @@ fn accessor_value_to_v8<'s>(
             (v8_str(scope, &value).into(), value)
         }
         AccessorValue::DocumentCookie => {
-            let value = crate::document_cookie(state);
+            let value = crate::webapi::document::document_cookie(state);
             (v8_str(scope, &value).into(), value)
         }
         AccessorValue::ScreenWidth => {

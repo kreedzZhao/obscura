@@ -1,3 +1,4 @@
+pub(crate) mod document;
 pub(crate) mod location;
 pub(crate) mod navigator;
 pub(crate) mod screen;
@@ -33,6 +34,6 @@ pub(crate) fn install_browser_objects(scope: &mut v8::HandleScope, state_ptr: *m
     let location = location::create_location(scope, state_ptr);
     set_property(scope, global, "location", location.into());
 
-    let document = crate::create_document(scope, state_ptr);
+    let document = document::create_document(scope, state_ptr);
     set_property(scope, global, "document", document.into());
 }
