@@ -106,7 +106,8 @@ fn trace_json_keeps_stable_event_shape() {
 Run:
 
 ```bash
-cargo test -p obscura-native-runtime exposes_pdf_plugin_and_mime_type_shape_for_track17 trace_json_keeps_stable_event_shape -- --test-threads=1
+cargo test -p obscura-native-runtime exposes_pdf_plugin_and_mime_type_shape_for_track17 -- --test-threads=1
+cargo test -p obscura-native-runtime trace_json_keeps_stable_event_shape -- --test-threads=1
 ```
 
 Expected: both tests pass against the current implementation.
@@ -349,7 +350,8 @@ Adjust the list to exactly what the compiler reports as needed.
 Run:
 
 ```bash
-cargo test -p obscura-native-runtime records_web_api_trace_events trace_json_keeps_stable_event_shape -- --test-threads=1
+cargo test -p obscura-native-runtime records_web_api_trace_events -- --test-threads=1
+cargo test -p obscura-native-runtime trace_json_keeps_stable_event_shape -- --test-threads=1
 ```
 
 Expected: both trace tests pass.
@@ -492,7 +494,9 @@ If compilation shows missing document/timer/crypto/encoding/base64 installation 
 Run:
 
 ```bash
-cargo test -p obscura-native-runtime evaluates_javascript_and_browser_globals exposes_pdf_plugin_and_mime_type_shape_for_track17 exposes_track17_fingerprint_environment -- --test-threads=1
+cargo test -p obscura-native-runtime evaluates_javascript_and_browser_globals -- --test-threads=1
+cargo test -p obscura-native-runtime exposes_pdf_plugin_and_mime_type_shape_for_track17 -- --test-threads=1
+cargo test -p obscura-native-runtime exposes_track17_fingerprint_environment -- --test-threads=1
 ```
 
 Expected: all listed tests pass.
@@ -577,7 +581,9 @@ set_property(scope, global, "document", document.into());
 Run:
 
 ```bash
-cargo test -p obscura-native-runtime loads_html_into_native_document_state query_selector_returns_native_element_wrappers exposes_track17_fingerprint_environment -- --test-threads=1
+cargo test -p obscura-native-runtime loads_html_into_native_document_state -- --test-threads=1
+cargo test -p obscura-native-runtime query_selector_returns_native_element_wrappers -- --test-threads=1
+cargo test -p obscura-native-runtime exposes_track17_fingerprint_environment -- --test-threads=1
 ```
 
 Expected: all listed tests pass.
@@ -682,7 +688,13 @@ crypto::install_crypto(scope, global);
 Run:
 
 ```bash
-cargo test -p obscura-native-runtime exposes_timer_functions_for_browser_bundles set_timeout_advances_async_browser_code drains_pending_timer_callbacks text_encoder_encodes_utf8_bytes text_decoder_decodes_utf8_bytes exposes_base64_helpers exposes_crypto_get_random_values -- --test-threads=1
+cargo test -p obscura-native-runtime exposes_timer_functions_for_browser_bundles -- --test-threads=1
+cargo test -p obscura-native-runtime set_timeout_advances_async_browser_code -- --test-threads=1
+cargo test -p obscura-native-runtime drains_pending_timer_callbacks -- --test-threads=1
+cargo test -p obscura-native-runtime text_encoder_encodes_utf8_bytes -- --test-threads=1
+cargo test -p obscura-native-runtime text_decoder_decodes_utf8_bytes -- --test-threads=1
+cargo test -p obscura-native-runtime exposes_base64_helpers -- --test-threads=1
+cargo test -p obscura-native-runtime exposes_crypto_get_random_values -- --test-threads=1
 ```
 
 Expected: all listed tests pass.
@@ -781,7 +793,8 @@ when creating a `CANVAS` element.
 Run:
 
 ```bash
-cargo test -p obscura-native-runtime document_create_element_returns_canvas_shim records_web_api_trace_events -- --test-threads=1
+cargo test -p obscura-native-runtime document_create_element_returns_canvas_shim -- --test-threads=1
+cargo test -p obscura-native-runtime records_web_api_trace_events -- --test-threads=1
 ```
 
 Expected: both tests pass.

@@ -253,6 +253,46 @@ fn exposes_track17_fingerprint_environment() {
 }
 
 #[test]
+fn exposes_pdf_plugin_and_mime_type_shape_for_track17() {
+    let mut runtime = NativeRuntime::new(RuntimeOptions::default());
+
+    assert_eq!(
+        runtime
+            .eval_json(
+                r#"
+                [
+                    navigator.plugins.length,
+                    navigator.plugins[0].name,
+                    navigator.plugins[0].filename,
+                    navigator.plugins[0].description,
+                    navigator.plugins[0].length,
+                    Object.prototype.toString.call(navigator.plugins[0]),
+                    navigator.mimeTypes.length,
+                    navigator.mimeTypes[0].type,
+                    navigator.mimeTypes[0].description,
+                    navigator.mimeTypes[0].suffixes,
+                    Object.prototype.toString.call(navigator.mimeTypes[0])
+                ]
+                "#,
+            )
+            .unwrap(),
+        json!([
+            5,
+            "PDF Viewer",
+            "internal-pdf-viewer",
+            "Portable Document Format",
+            1,
+            "[object Plugin]",
+            2,
+            "application/pdf",
+            "Portable Document Format",
+            "pdf",
+            "[object MimeType]"
+        ])
+    );
+}
+
+#[test]
 fn drains_promise_microtasks() {
     let mut runtime = NativeRuntime::new(RuntimeOptions::default());
 
@@ -468,4 +508,24 @@ fn records_web_api_trace_events() {
         .iter()
         .any(|event| event.target == "crypto" && event.name == "getRandomValues"));
     assert!(runtime.trace().is_empty());
+}
+
+#[test]
+fn trace_json_keeps_stable_event_shape() {
+    let mut runtime = NativeRuntime::new(RuntimeOptions::default());
+
+    runtime.eval_json("navigator.userAgent; null").unwrap();
+
+    assert_eq!(
+        runtime.trace_json(),
+        json!([
+            {
+                "target": "navigator",
+                "name": "userAgent",
+                "kind": "get",
+                "args": [],
+                "result": RuntimeOptions::default().user_agent
+            }
+        ])
+    );
 }
