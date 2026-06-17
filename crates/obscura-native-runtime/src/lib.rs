@@ -1,6 +1,5 @@
 //! Native V8 runtime experiment for Obscura.
 
-use std::ffi::c_void;
 use std::sync::Once;
 
 use base64::Engine;
@@ -10,12 +9,12 @@ mod bindings;
 mod state;
 mod trace;
 mod values;
+mod webapi;
 
 use bindings::{
-    accessor, define_object_accessors, define_template_accessors, instantiate_with_state,
-    set_function_property, set_template_accessor, set_template_function,
-    set_traced_function_property, set_traced_template_function, state_ptr, AccessorSpec,
-    AccessorValue,
+    accessor, define_template_accessors, instantiate_with_state, set_function_property,
+    set_template_accessor, set_template_function, set_traced_function_property,
+    set_traced_template_function, state_ptr, AccessorSpec, AccessorValue,
 };
 use state::{NativeState, TimerTask};
 pub use trace::TraceEvent;
@@ -78,63 +77,6 @@ pub struct NativeRuntime {
     context: v8::Global<v8::Context>,
     state: Box<NativeState>,
 }
-
-pub(crate) const WINDOW_ACCESSORS: &[AccessorSpec] = &[
-    accessor(
-        "window",
-        "devicePixelRatio",
-        AccessorValue::WindowDevicePixelRatio,
-    ),
-    accessor("window", "innerWidth", AccessorValue::WindowInnerWidth),
-    accessor("window", "innerHeight", AccessorValue::WindowInnerHeight),
-    accessor("window", "outerWidth", AccessorValue::WindowOuterWidth),
-    accessor("window", "outerHeight", AccessorValue::WindowOuterHeight),
-];
-
-pub(crate) const NAVIGATOR_ACCESSORS: &[AccessorSpec] = &[
-    accessor("navigator", "userAgent", AccessorValue::NavigatorUserAgent),
-    accessor(
-        "navigator",
-        "appVersion",
-        AccessorValue::NavigatorAppVersion,
-    ),
-    accessor("navigator", "platform", AccessorValue::NavigatorPlatform),
-    accessor("navigator", "language", AccessorValue::NavigatorLanguage),
-    accessor("navigator", "languages", AccessorValue::NavigatorLanguages),
-    accessor("navigator", "webdriver", AccessorValue::Bool(false)),
-    accessor(
-        "navigator",
-        "hardwareConcurrency",
-        AccessorValue::NavigatorHardwareConcurrency,
-    ),
-    accessor(
-        "navigator",
-        "deviceMemory",
-        AccessorValue::NavigatorDeviceMemory,
-    ),
-    accessor("navigator", "cookieEnabled", AccessorValue::Bool(true)),
-    accessor("navigator", "maxTouchPoints", AccessorValue::U32(0)),
-    accessor("navigator", "vendor", AccessorValue::String("Google Inc.")),
-    accessor("navigator", "product", AccessorValue::String("Gecko")),
-    accessor("navigator", "productSub", AccessorValue::String("20030107")),
-    accessor("navigator", "doNotTrack", AccessorValue::Null),
-    accessor("navigator", "pdfViewerEnabled", AccessorValue::Bool(true)),
-    accessor("navigator", "onLine", AccessorValue::Bool(true)),
-    accessor("navigator", "plugins", AccessorValue::NavigatorPlugins),
-    accessor("navigator", "mimeTypes", AccessorValue::NavigatorMimeTypes),
-];
-
-pub(crate) const SCREEN_ACCESSORS: &[AccessorSpec] = &[
-    accessor("screen", "width", AccessorValue::ScreenWidth),
-    accessor("screen", "height", AccessorValue::ScreenHeight),
-    accessor("screen", "availWidth", AccessorValue::ScreenAvailWidth),
-    accessor("screen", "availHeight", AccessorValue::ScreenAvailHeight),
-    accessor("screen", "colorDepth", AccessorValue::ScreenColorDepth),
-    accessor("screen", "pixelDepth", AccessorValue::ScreenColorDepth),
-];
-
-pub(crate) const LOCATION_ACCESSORS: &[AccessorSpec] =
-    &[accessor("location", "href", AccessorValue::LocationHref)];
 
 pub(crate) const DOCUMENT_ACCESSORS: &[AccessorSpec] = &[
     accessor("document", "URL", AccessorValue::DocumentUrl),
@@ -202,7 +144,7 @@ impl NativeRuntime {
                 },
             );
             let scope = &mut v8::ContextScope::new(scope, context);
-            install_browser_objects(scope, state_ptr);
+            webapi::install_browser_objects(scope, state_ptr);
             v8::Global::new(scope, context)
         };
 
@@ -324,64 +266,20 @@ fn create_global_template<'s>(
     template
 }
 
-fn install_browser_objects(scope: &mut v8::HandleScope, state_ptr: *mut NativeState) {
-    let context = scope.get_current_context();
-    let global = context.global(scope);
-    let external = v8::External::new(scope, state_ptr.cast::<c_void>());
-    global.set_internal_field(0, external.into());
-
-    install_window_constructor(scope, global);
-    install_dom_constructors(scope, global);
-    set_property(scope, global, "window", global.into());
-    set_property(scope, global, "self", global.into());
-    install_window_values(scope, global, state_ptr);
-    install_timer_functions(scope, global);
-    install_encoding(scope, global);
-    install_base64(scope, global);
-    install_crypto(scope, global);
-
-    let navigator = create_navigator(scope, state_ptr);
-    set_property(scope, global, "navigator", navigator.into());
-
-    let screen = create_screen(scope, state_ptr);
-    set_property(scope, global, "screen", screen.into());
-
-    let location = create_location(scope, state_ptr);
-    set_property(scope, global, "location", location.into());
-
-    let document = create_document(scope, state_ptr);
-    set_property(scope, global, "document", document.into());
-}
-
-fn install_window_constructor(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
-    let key = v8::String::new(scope, "Window").unwrap();
-    let template = v8::FunctionTemplate::new(scope, window_constructor);
-    template.set_class_name(key);
-    let function = template.get_function(scope).unwrap();
-    global.set(scope, key.into(), function.into());
-
-    let prototype_key = v8::String::new(scope, "prototype").unwrap();
-    if let Some(prototype) = function.get(scope, prototype_key.into()) {
-        if let Ok(prototype) = v8::Local::<v8::Object>::try_from(prototype) {
-            global.set_prototype(scope, prototype.into());
-        }
-    }
-}
-
-fn install_dom_constructors(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
-    install_constructor(
+pub(crate) fn install_dom_constructors(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+    webapi::window::install_constructor(
         scope,
         global,
         "HTMLCanvasElement",
         html_canvas_element_constructor,
     );
-    install_constructor(
+    webapi::window::install_constructor(
         scope,
         global,
         "CanvasRenderingContext2D",
         canvas_rendering_context_2d_constructor,
     );
-    install_constructor(
+    webapi::window::install_constructor(
         scope,
         global,
         "WebGLRenderingContext",
@@ -389,27 +287,14 @@ fn install_dom_constructors(scope: &mut v8::HandleScope, global: v8::Local<v8::O
     );
 }
 
-fn install_constructor(
-    scope: &mut v8::HandleScope,
-    global: v8::Local<v8::Object>,
-    name: &str,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let template = v8::FunctionTemplate::new(scope, callback);
-    template.set_class_name(key);
-    let function = template.get_function(scope).unwrap();
-    global.set(scope, key.into(), function.into());
-}
-
-fn install_timer_functions(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+pub(crate) fn install_timer_functions(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
     set_function_property(scope, global, "setTimeout", set_timeout);
     set_function_property(scope, global, "setInterval", set_interval);
     set_function_property(scope, global, "clearTimeout", clear_timer);
     set_function_property(scope, global, "clearInterval", clear_timer);
 }
 
-fn install_encoding(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+pub(crate) fn install_encoding(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
     install_encoding_constructor(
         scope,
         global,
@@ -428,12 +313,12 @@ fn install_encoding(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) 
     );
 }
 
-fn install_base64(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+pub(crate) fn install_base64(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
     set_function_property(scope, global, "atob", atob);
     set_function_property(scope, global, "btoa", btoa);
 }
 
-fn install_crypto(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+pub(crate) fn install_crypto(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
     let crypto = v8::Object::new(scope);
     set_traced_function_property(
         scope,
@@ -462,45 +347,7 @@ fn install_encoding_constructor(
     global.set(scope, key.into(), function.into());
 }
 
-fn install_window_values(
-    scope: &mut v8::HandleScope,
-    global: v8::Local<v8::Object>,
-    _state_ptr: *mut NativeState,
-) {
-    define_object_accessors(scope, global, WINDOW_ACCESSORS);
-}
-
-fn create_navigator<'s>(
-    scope: &mut v8::HandleScope<'s>,
-    state_ptr: *mut NativeState,
-) -> v8::Local<'s, v8::Object> {
-    let template = v8::ObjectTemplate::new(scope);
-    template.set_internal_field_count(1);
-    define_template_accessors(scope, template, NAVIGATOR_ACCESSORS);
-    instantiate_with_state(scope, template, state_ptr)
-}
-
-fn create_screen<'s>(
-    scope: &mut v8::HandleScope<'s>,
-    state_ptr: *mut NativeState,
-) -> v8::Local<'s, v8::Object> {
-    let template = v8::ObjectTemplate::new(scope);
-    template.set_internal_field_count(1);
-    define_template_accessors(scope, template, SCREEN_ACCESSORS);
-    instantiate_with_state(scope, template, state_ptr)
-}
-
-fn create_location<'s>(
-    scope: &mut v8::HandleScope<'s>,
-    state_ptr: *mut NativeState,
-) -> v8::Local<'s, v8::Object> {
-    let template = v8::ObjectTemplate::new(scope);
-    template.set_internal_field_count(1);
-    define_template_accessors(scope, template, LOCATION_ACCESSORS);
-    instantiate_with_state(scope, template, state_ptr)
-}
-
-fn create_document<'s>(
+pub(crate) fn create_document<'s>(
     scope: &mut v8::HandleScope<'s>,
     state_ptr: *mut NativeState,
 ) -> v8::Local<'s, v8::Object> {
@@ -549,53 +396,6 @@ fn create_element<'s>(
     let key = v8::Symbol::get_to_string_tag(scope);
     element.set(scope, key.into(), tag.into());
     element
-}
-
-pub(crate) fn create_plugin_object<'s>(
-    scope: &mut v8::HandleScope<'s>,
-    name: &str,
-) -> v8::Local<'s, v8::Object> {
-    let plugin = v8::Object::new(scope);
-    let name_value = v8_str(scope, name);
-    set_property(scope, plugin, "name", name_value.into());
-    let filename = v8_str(scope, "internal-pdf-viewer");
-    set_property(scope, plugin, "filename", filename.into());
-    let description = v8_str(scope, "Portable Document Format");
-    set_property(scope, plugin, "description", description.into());
-    let length = v8::Integer::new(scope, 1);
-    set_property(scope, plugin, "length", length.into());
-    let tag = v8::String::new(scope, "Plugin").unwrap();
-    let key = v8::Symbol::get_to_string_tag(scope);
-    plugin.set(scope, key.into(), tag.into());
-    plugin
-}
-
-pub(crate) fn create_mime_type_object<'s>(
-    scope: &mut v8::HandleScope<'s>,
-    mime_type: &str,
-) -> v8::Local<'s, v8::Object> {
-    let object = v8::Object::new(scope);
-    let type_value = v8_str(scope, mime_type);
-    set_property(scope, object, "type", type_value.into());
-    let description = v8_str(scope, "Portable Document Format");
-    set_property(scope, object, "description", description.into());
-    let suffixes = v8_str(scope, "pdf");
-    set_property(scope, object, "suffixes", suffixes.into());
-    let enabled_plugin = v8::null(scope);
-    set_property(scope, object, "enabledPlugin", enabled_plugin.into());
-    let tag = v8::String::new(scope, "MimeType").unwrap();
-    let key = v8::Symbol::get_to_string_tag(scope);
-    object.set(scope, key.into(), tag.into());
-    object
-}
-
-fn window_constructor(
-    scope: &mut v8::HandleScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let global = scope.get_current_context().global(scope);
-    rv.set(global.into());
 }
 
 fn html_canvas_element_constructor(

@@ -184,10 +184,10 @@ pub(crate) fn binding_from_data(
 
 fn find_accessor_spec(target: &str, name: &str) -> Option<&'static AccessorSpec> {
     [
-        crate::WINDOW_ACCESSORS,
-        crate::NAVIGATOR_ACCESSORS,
-        crate::SCREEN_ACCESSORS,
-        crate::LOCATION_ACCESSORS,
+        crate::webapi::window::WINDOW_ACCESSORS,
+        crate::webapi::navigator::NAVIGATOR_ACCESSORS,
+        crate::webapi::screen::SCREEN_ACCESSORS,
+        crate::webapi::location::LOCATION_ACCESSORS,
         crate::DOCUMENT_ACCESSORS,
     ]
     .into_iter()
@@ -301,7 +301,7 @@ fn accessor_value_to_v8<'s>(
             ];
             let array = v8::Array::new(scope, plugins.len() as i32);
             for (index, name) in plugins.iter().enumerate() {
-                let plugin = crate::create_plugin_object(scope, name);
+                let plugin = crate::webapi::navigator::create_plugin_object(scope, name);
                 array.set_index(scope, index as u32, plugin.into());
             }
             (array.into(), "Array(5)".to_string())
@@ -310,7 +310,7 @@ fn accessor_value_to_v8<'s>(
             let mime_types = ["application/pdf", "text/pdf"];
             let array = v8::Array::new(scope, mime_types.len() as i32);
             for (index, name) in mime_types.iter().enumerate() {
-                let mime_type = crate::create_mime_type_object(scope, name);
+                let mime_type = crate::webapi::navigator::create_mime_type_object(scope, name);
                 array.set_index(scope, index as u32, mime_type.into());
             }
             (array.into(), "Array(2)".to_string())

@@ -393,7 +393,7 @@ git commit -m "refactor: extract native binding helpers"
 - Produces: `screen::create_screen`
 - Produces: `location::create_location`
 
-- [ ] **Step 1: Move browser installer**
+- [x] **Step 1: Move browser installer**
 
 Create `src/webapi/mod.rs`:
 
@@ -435,7 +435,7 @@ pub(crate) fn install_browser_objects(
 
 This starts with a partial installer. Later tasks add document, timers, encoding, crypto, canvas, and WebGL back into it.
 
-- [ ] **Step 2: Move window code**
+- [x] **Step 2: Move window code**
 
 Move these from `lib.rs` to `webapi/window.rs`:
 
@@ -449,7 +449,7 @@ install_window_values
 
 Keep constructor helpers `pub(crate)` when other modules still need them.
 
-- [ ] **Step 3: Move navigator code**
+- [x] **Step 3: Move navigator code**
 
 Move these from `lib.rs` to `webapi/navigator.rs`:
 
@@ -460,7 +460,7 @@ create_plugin_object
 create_mime_type_object
 ```
 
-- [ ] **Step 4: Move screen and location code**
+- [x] **Step 4: Move screen and location code**
 
 Move these from `lib.rs`:
 
@@ -471,7 +471,7 @@ LOCATION_ACCESSORS -> webapi/location.rs
 create_location -> webapi/location.rs
 ```
 
-- [ ] **Step 5: Update lib.rs installer call**
+- [x] **Step 5: Update lib.rs installer call**
 
 Add:
 
@@ -485,11 +485,11 @@ Replace the old local `install_browser_objects` call with:
 webapi::install_browser_objects(scope, state_ptr);
 ```
 
-- [ ] **Step 6: Restore missing installation calls**
+- [x] **Step 6: Restore missing installation calls**
 
 If compilation shows missing document/timer/crypto/encoding/base64 installation because `install_browser_objects` was moved partially, keep those calls temporarily in `webapi::install_browser_objects` by importing their still-in-`lib.rs` functions with `pub(crate)` visibility. Do not change behavior.
 
-- [ ] **Step 7: Run browser global tests**
+- [x] **Step 7: Run browser global tests**
 
 Run:
 
@@ -501,7 +501,7 @@ cargo test -p obscura-native-runtime exposes_track17_fingerprint_environment -- 
 
 Expected: all listed tests pass.
 
-- [ ] **Step 8: Run full smoke test**
+- [x] **Step 8: Run full smoke test**
 
 Run:
 
@@ -511,7 +511,7 @@ cargo test -p obscura-native-runtime --test runtime_smoke -- --test-threads=1
 
 Expected: all tests pass.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 Run:
 
